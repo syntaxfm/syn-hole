@@ -22,6 +22,64 @@ export const mainQuestions = [
   // },
   {
     kind: "choice",
+    id: "dev",
+    prompt: "Dev",
+    allowMultiple: false,
+    hideResultsUntilReveal: false,
+    options: [
+      {
+        id: "api-classifier",
+        label: "A jev-like API Compliant classifier by Cognition / Devin",
+      },
+      {
+        id: "short-for-development",
+        label: "A short form of the word Development",
+      },
+      { id: "both", label: "both" },
+    ],
+    correctOptionIds: ["short-for-development"],
+  },
+  {
+    kind: "choice",
+    id: "jimi",
+    prompt: "Jimi",
+    allowMultiple: false,
+    hideResultsUntilReveal: false,
+    options: [
+      {
+        id: "abliterated-kimi",
+        label: "An abliterated version of Kimi K3 used in the recent cyber attacks",
+      },
+      {
+        id: "orchestration-tool",
+        label:
+          "An orchestration automation tool focusing on multi-team collaboration through an intuitive flow-based interface",
+      },
+      { id: "both", label: "both" },
+    ],
+    correctOptionIds: ["orchestration-tool"],
+  },
+  {
+    kind: "choice",
+    id: "redact",
+    prompt: "Redact",
+    allowMultiple: false,
+    hideResultsUntilReveal: false,
+    options: [
+      {
+        id: "react-alternative",
+        label: "A smaller and faster React alternative built by the TanStack team",
+      },
+      {
+        id: "redaction-model",
+        label: "A local transformer-based model for redacting sensitive info from documents",
+      },
+      { id: "both", label: "both" },
+    ],
+    correctOptionIds: ["react-alternative"],
+  },
+  {
+    kind: "choice",
     id: "kagan",
     prompt: "Kagan",
     allowMultiple: false,
