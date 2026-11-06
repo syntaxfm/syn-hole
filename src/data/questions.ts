@@ -173,41 +173,41 @@ export const mainQuestions = [
     ],
     correctOptionIds: ["portable-label-printer"],
   },
-  {
-    kind: "choice",
-    id: "aspero",
-    prompt: "Aspero",
-    allowMultiple: false,
-    hideResultsUntilReveal: false,
-    options: [
-      { id: "gravel-bike", label: "A Gravel Bike, built for speed" },
-      {
-        id: "scraping-service",
-        label: "A Cloud based web scraping service, built for speed",
-      },
-      { id: "both", label: "both" },
-    ],
-    correctOptionIds: ["gravel-bike"],
-  },
-  {
-    kind: "choice",
-    id: "kenny-powers",
-    prompt: "Kenny Powers",
-    allowMultiple: false,
-    hideResultsUntilReveal: false,
-    options: [
-      {
-        id: "fictional-baseball-player",
-        label: "A fictional world famous baseball player",
-      },
-      {
-        id: "chaos-testing-loop",
-        label: "An AI loop that tests your code's robustness by adding chaos.",
-      },
-      { id: "both", label: "both" },
-    ],
-    correctOptionIds: ["fictional-baseball-player"],
-  },
+  // {
+  //   kind: "choice",
+  //   id: "aspero",
+  //   prompt: "Aspero",
+  //   allowMultiple: false,
+  //   hideResultsUntilReveal: false,
+  //   options: [
+  //     { id: "gravel-bike", label: "A Gravel Bike, built for speed" },
+  //     {
+  //       id: "scraping-service",
+  //       label: "A Cloud based web scraping service, built for speed",
+  //     },
+  //     { id: "both", label: "both" },
+  //   ],
+  //   correctOptionIds: ["gravel-bike"],
+  // },
+  // {
+  //   kind: "choice",
+  //   id: "kenny-powers",
+  //   prompt: "Kenny Powers",
+  //   allowMultiple: false,
+  //   hideResultsUntilReveal: false,
+  //   options: [
+  //     {
+  //       id: "fictional-baseball-player",
+  //       label: "A fictional world famous baseball player",
+  //     },
+  //     {
+  //       id: "chaos-testing-loop",
+  //       label: "An AI loop that tests your code's robustness by adding chaos.",
+  //     },
+  //     { id: "both", label: "both" },
+  //   ],
+  //   correctOptionIds: ["fictional-baseball-player"],
+  // },
   {
     kind: "choice",
     id: "luminexia",
