@@ -1,3 +1,6 @@
+# Single-package repo. pnpm 9 (Cloudflare's default) rejects this file without `packages`.
+packages:
+  - "."
 allowBuilds:
   esbuild: true
   sharp: true
