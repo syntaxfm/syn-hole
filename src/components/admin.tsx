@@ -15,6 +15,7 @@ import {
   EyeOff,
   Shield,
 } from "lucide-react";
+import { AdminPollImages } from "~/components/admin-poll-images";
 
 const ADMIN_KEY_STORAGE_KEY = "syntax-live-admin-key";
 
@@ -414,6 +415,8 @@ export function AdminPage() {
           </button>
         </form>
       </section>
+
+      <AdminPollImages adminKey={adminKey} />
 
       <section className="admin-rooms-section">
         <h3>

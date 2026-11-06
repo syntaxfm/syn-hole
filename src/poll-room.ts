@@ -1,9 +1,13 @@
 import { Server } from "partyserver";
 import type { Connection, ConnectionContext } from "partyserver";
 import questionsData from "./data/questions";
+import { loadOptionImages } from "./poll-images";
+import { isPollImageId } from "./utils/poll-images";
 import type {
   IncomingMessage,
   OutgoingMessage,
+  PollChoiceDisplay,
+  PollOptionImage,
   PollPhase,
   PollQuestion,
   PollQuestionPublic,
@@ -17,7 +21,7 @@ type PollConnectionState = {
   displayName: string | null;
 };
 
-const QUESTIONS = validateQuestions(questionsData);
+export const QUESTIONS = validateQuestions(questionsData);
 
 export class PollRoom extends Server<Env> {
   static options = { hibernate: true };
@@ -25,12 +29,19 @@ export class PollRoom extends Server<Env> {
   private currentQuestionIndex = 0;
   private readonly phaseByQuestionIndex = new Map<number, PollPhase>();
   private readonly votesByQuestionIndex = new Map<number, Map<string, string[]>>();
+  private optionImages: Record<string, PollOptionImage> = {};
   private stateLoaded = false;
   private loadStatePromise: Promise<void> | null = null;
 
   async onRequest(request: Request): Promise<Response> {
     await this.ensureStateLoaded();
     const url = new URL(request.url);
+
+    if (url.pathname.endsWith("/images-changed") && request.method === "POST") {
+      await this.refreshOptionImages();
+      this.broadcastState();
+      return Response.json({ ok: true });
+    }
 
     if (url.pathname.endsWith("/stats") && request.method === "GET") {
       const connections = Array.from(this.getConnections<PollConnectionState>());
@@ -79,6 +90,7 @@ export class PollRoom extends Server<Env> {
       this.phaseByQuestionIndex.clear();
       this.votesByQuestionIndex.clear();
       await this.clearPersistedState();
+      await this.refreshOptionImages();
       this.broadcastState();
       return Response.json({ ok: true });
     }
@@ -245,6 +257,7 @@ export class PollRoom extends Server<Env> {
         this.phaseByQuestionIndex.set(this.currentQuestionIndex, "open");
         await this.persistCurrentQuestionIndex();
         await this.persistPhase(this.currentQuestionIndex, "open");
+        await this.refreshOptionImages();
         this.broadcastState();
         return;
       }
@@ -276,9 +289,20 @@ export class PollRoom extends Server<Env> {
         this.phaseByQuestionIndex.clear();
         this.votesByQuestionIndex.clear();
         await this.clearPersistedState();
+        await this.refreshOptionImages();
         this.broadcastState();
         return;
       }
+    }
+  }
+
+  /** Best effort: a failed R2 read shows options without images rather than breaking the room. */
+  private async refreshOptionImages() {
+    try {
+      this.optionImages = await loadOptionImages(this.env.POLL_IMAGES, this.getCurrentQuestion());
+    } catch (error) {
+      console.error("Failed to load poll option images", error);
+      this.optionImages = {};
     }
   }
 
@@ -359,6 +383,7 @@ export class PollRoom extends Server<Env> {
       currentQuestionIndex: this.currentQuestionIndex,
       totalQuestions: QUESTIONS.length,
       question: questionPublic,
+      optionImages: this.optionImages,
       voteCounts,
       resultsVisible,
       totalResponses: votesForQuestion.size,
@@ -613,6 +638,7 @@ export class PollRoom extends Server<Env> {
       voteMap.set(row.voter_id, [String(restoredGuess)]);
     }
 
+    await this.refreshOptionImages();
     this.stateLoaded = true;
   }
 
@@ -731,6 +757,7 @@ function toPublicQuestion(question: PollQuestion): PollQuestionPublic {
       prompt: question.prompt,
       allowMultiple: question.allowMultiple,
       hideResultsUntilReveal: question.hideResultsUntilReveal,
+      display: question.display,
       options: question.options.map((option) => ({ ...option })),
     };
   }
@@ -912,6 +939,12 @@ function validateQuestions(rawQuestions: unknown): PollQuestion[] {
     const allowMultiple = question.allowMultiple;
     const options = question.options;
     const correctOptionIds = question.correctOptionIds;
+    const display = parseChoiceDisplay(question.display, id);
+    if (display === "image" && !isPollImageId(id)) {
+      throw new Error(
+        `Image question "${id}" needs an id of letters, numbers, "-" or "_" (max 64).`
+      );
+    }
     if (typeof allowMultiple !== "boolean") {
       throw new Error(`Question "${id}" must include boolean "allowMultiple".`);
     }
@@ -936,6 +969,11 @@ function validateQuestions(rawQuestions: unknown): PollQuestion[] {
       }
       if (optionIds.has(option.id)) {
         throw new Error(`Question "${id}" has duplicate option id "${option.id}".`);
+      }
+      if (display === "image" && !isPollImageId(option.id)) {
+        throw new Error(
+          `Image question "${id}" option "${option.id}" needs an id of letters, numbers, "-" or "_".`
+        );
       }
       optionIds.add(option.id);
       return { id: option.id, label: option.label };
@@ -969,10 +1007,17 @@ function validateQuestions(rawQuestions: unknown): PollQuestion[] {
       prompt,
       allowMultiple,
       hideResultsUntilReveal: hideResultsUntilReveal === true,
+      display,
       options: validatedOptions,
       correctOptionIds: validatedCorrectOptionIds,
     });
   }
 
   return validatedQuestions;
+}
+
+function parseChoiceDisplay(value: unknown, questionId: string): PollChoiceDisplay {
+  if (value === undefined || value === "text") return "text";
+  if (value === "image") return "image";
+  throw new Error(`Question "${questionId}" has invalid "display" (use "text" or "image").`);
 }

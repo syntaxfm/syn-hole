@@ -1,8 +1,18 @@
 import handler from "@tanstack/react-start/server-entry";
 import { routePartykitRequest } from "partyserver";
+import { QUESTIONS } from "./poll-room";
+import {
+  deletePollImage,
+  listAdminPollImages,
+  servePollImage,
+  uploadPollImage,
+} from "./poll-images";
 
 export { PollRoom } from "./poll-room";
 export { AdminRegistry } from "./admin-registry";
+
+/** Audience links without a room code land here (see src/routes/index.tsx). */
+const DEFAULT_ROOM_NAME = "main-stage";
 
 function getRole(role: string | null): "host" | "projector" | "audience" {
   if (role === "host" || role === "projector") return role;
@@ -84,6 +94,16 @@ export default {
       );
     }
 
+    const pollImageMatch = url.pathname.match(/^\/api\/images\/([^/]+)\/([^/]+)$/);
+    if (pollImageMatch && request.method === "GET") {
+      return servePollImage(
+        env.POLL_IMAGES,
+        QUESTIONS,
+        decodeURIComponent(pollImageMatch[1]),
+        decodeURIComponent(pollImageMatch[2])
+      );
+    }
+
     if (url.pathname.startsWith("/api/admin")) {
       return handleAdminApi(request, env, url);
     }
@@ -149,7 +169,9 @@ async function handleAdminApi(request: Request, env: Env, url: URL): Promise<Res
     const roomName = decodeURIComponent(roomStatsMatch[1]);
     const roomId = env.PollRoom.idFromName(roomName);
     const roomStub = env.PollRoom.get(roomId);
-    const resp = await roomStub.fetch(new Request("http://internal/stats"));
+    const resp = await roomStub.fetch(
+      new Request("http://internal/stats", { headers: { "x-partykit-room": roomName } })
+    );
     return resp;
   }
 
@@ -159,9 +181,35 @@ async function handleAdminApi(request: Request, env: Env, url: URL): Promise<Res
     const roomId = env.PollRoom.idFromName(roomName);
     const roomStub = env.PollRoom.get(roomId);
     const resp = await roomStub.fetch(
-      new Request("http://internal/reset", { method: "POST" })
+      new Request("http://internal/reset", {
+        method: "POST",
+        headers: { "x-partykit-room": roomName },
+      })
     );
     return resp;
+  }
+
+  if (path === "/images" && request.method === "GET") {
+    return Response.json(await listAdminPollImages(env.POLL_IMAGES, QUESTIONS), {
+      headers: { "cache-control": "no-store" },
+    });
+  }
+
+  const imageMatch = path.match(/^\/images\/([^/]+)\/([^/]+)$/);
+  if (imageMatch && (request.method === "PUT" || request.method === "DELETE")) {
+    const questionId = decodeURIComponent(imageMatch[1]);
+    const optionId = decodeURIComponent(imageMatch[2]);
+    const response =
+      request.method === "PUT"
+        ? await uploadPollImage(env.POLL_IMAGES, QUESTIONS, questionId, optionId, request)
+        : await deletePollImage(env.POLL_IMAGES, QUESTIONS, questionId, optionId);
+    if (response.ok) {
+      // Best effort: the upload already succeeded even if a room can't be reached.
+      await notifyRoomsImagesChanged(env).catch((error: unknown) => {
+        console.error("Failed to notify rooms about image change", error);
+      });
+    }
+    return response;
   }
 
   const roomDeleteMatch = path.match(/^\/rooms\/([^/]+)$/);
@@ -177,4 +225,27 @@ async function handleAdminApi(request: Request, env: Env, url: URL): Promise<Res
   }
 
   return new Response("Not Found", { status: 404 });
+}
+
+/** Lets open screens pick up a new or removed image without the host reselecting the question. */
+async function notifyRoomsImagesChanged(env: Env): Promise<void> {
+  const registryResponse = await getRegistryStub(env).fetch(new Request("http://internal/rooms"));
+  const rows = (await registryResponse.json()) as Array<{ name: string }>;
+  const roomNames = new Set([DEFAULT_ROOM_NAME, ...rows.map((row) => row.name)]);
+
+  const results = await Promise.allSettled(
+    Array.from(roomNames, (roomName) =>
+      env.PollRoom.get(env.PollRoom.idFromName(roomName)).fetch(
+        new Request("http://internal/images-changed", {
+          method: "POST",
+          headers: { "x-partykit-room": roomName },
+        })
+      )
+    )
+  );
+  for (const result of results) {
+    if (result.status === "rejected") {
+      console.error("Failed to notify room about image change", result.reason);
+    }
+  }
 }

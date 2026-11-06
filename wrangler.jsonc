@@ -13,6 +13,12 @@
       "custom_domain": true,
     },
   ],
+  "r2_buckets": [
+    {
+      "binding": "POLL_IMAGES",
+      "bucket_name": "syn-hole-poll-images",
+    },
+  ],
   "durable_objects": {
     "bindings": [
       {

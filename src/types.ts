@@ -6,6 +6,9 @@ export type PollOption = {
   label: string;
 };
 
+/** "image" shows each option as an uploaded image; the option label becomes its alt text. */
+export type PollChoiceDisplay = "text" | "image";
+
 export type PollChoiceQuestion = {
   kind: "choice";
   id: string;
@@ -14,6 +17,27 @@ export type PollChoiceQuestion = {
   correctOptionIds: string[];
   allowMultiple: boolean;
   hideResultsUntilReveal?: boolean;
+  display?: PollChoiceDisplay;
+};
+
+export type PollOptionImage = {
+  url: string;
+  width: number;
+  height: number;
+};
+
+export type AdminPollImageOption = {
+  id: string;
+  label: string;
+  image: (PollOptionImage & { size: number }) | null;
+};
+
+export type AdminPollImageQuestion = {
+  index: number;
+  id: string;
+  prompt: string;
+  correctOptionIds: string[];
+  options: AdminPollImageOption[];
 };
 
 export type PollNumberQuestion = {
@@ -70,6 +94,8 @@ export type OutgoingMessage =
       currentQuestionIndex: number;
       totalQuestions: number;
       question: PollQuestionPublic | null;
+      /** Images for the current question, keyed by option id. Empty unless display is "image". */
+      optionImages: Record<string, PollOptionImage>;
       voteCounts: VoteCounts;
       resultsVisible: boolean;
       totalResponses: number;

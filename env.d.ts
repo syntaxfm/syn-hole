@@ -6,6 +6,7 @@ declare namespace Cloudflare {
 		ADMIN_KEY: string;
 		PollRoom: DurableObjectNamespace<import("./src/poll-room").PollRoom>;
 		AdminRegistry: DurableObjectNamespace<import("./src/admin-registry").AdminRegistry>;
+		POLL_IMAGES: R2Bucket;
 	}
 }
 interface Env extends Cloudflare.Env {}

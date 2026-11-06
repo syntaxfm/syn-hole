@@ -22,8 +22,10 @@ import type {
   PollChoiceQuestionPublic,
   PollNumberQuestion,
   PollNumberQuestionPublic,
+  PollOptionImage,
   PollRole,
 } from "~/types";
+import { isImageQuestion, isLandscapeImageSet } from "~/utils/poll-images";
 
 type ViewMode = "audience" | "host" | "projector";
 
@@ -598,16 +600,30 @@ function AudienceContent(props: {
       </div>
 
       <div className="audience-right">
-        <AudienceChoiceOptions
-          question={question}
-          voteCounts={stateMessage.voteCounts}
-          totalResponses={stateMessage.totalResponses}
-          selectedOptionIds={selectedOptionIds}
-          revealCorrectOptionIds={revealChoice?.correctOptionIds ?? []}
-          showResults={stateMessage.resultsVisible}
-          canInteract={canInteract}
-          onToggleOption={onToggleOption}
-        />
+        {isImageQuestion(question) ? (
+          <AudienceImageOptions
+            question={question}
+            images={stateMessage.optionImages}
+            voteCounts={stateMessage.voteCounts}
+            totalResponses={stateMessage.totalResponses}
+            selectedOptionIds={selectedOptionIds}
+            revealCorrectOptionIds={revealChoice?.correctOptionIds ?? []}
+            showResults={stateMessage.resultsVisible}
+            canInteract={canInteract}
+            onToggleOption={onToggleOption}
+          />
+        ) : (
+          <AudienceChoiceOptions
+            question={question}
+            voteCounts={stateMessage.voteCounts}
+            totalResponses={stateMessage.totalResponses}
+            selectedOptionIds={selectedOptionIds}
+            revealCorrectOptionIds={revealChoice?.correctOptionIds ?? []}
+            showResults={stateMessage.resultsVisible}
+            canInteract={canInteract}
+            onToggleOption={onToggleOption}
+          />
+        )}
         <div className="audience-total-card">
           <FlowInteger value={stateMessage.totalResponses} /> total answers submitted
         </div>
@@ -939,12 +955,25 @@ function HostView(props: {
               yourNumberGuess={null}
             />
           ) : (
-            <HostPreviewChoiceResults
-              question={question}
-              voteCounts={stateMessage.voteCounts}
-              totalResponses={stateMessage.totalResponses}
-              showResults={stateMessage.resultsVisible}
-            />
+            isImageQuestion(question) ? (
+              <HostPreviewImageResults
+                question={question}
+                images={stateMessage.optionImages}
+                voteCounts={stateMessage.voteCounts}
+                totalResponses={stateMessage.totalResponses}
+                showResults={stateMessage.resultsVisible}
+                correctOptionIds={
+                  stateMessage.reveal?.kind === "choice" ? stateMessage.reveal.correctOptionIds : []
+                }
+              />
+            ) : (
+              <HostPreviewChoiceResults
+                question={question}
+                voteCounts={stateMessage.voteCounts}
+                totalResponses={stateMessage.totalResponses}
+                showResults={stateMessage.resultsVisible}
+              />
+            )
           )
         ) : null}
 
@@ -1045,6 +1074,18 @@ function ProjectorMainContent(props: { stateMessage: StateMessage }) {
   const question = stateMessage.question;
   if (!question) return null;
   const revealChoice = stateMessage.reveal?.kind === "choice" ? stateMessage.reveal : null;
+  if (isImageQuestion(question)) {
+    return (
+      <ProjectorImageResults
+        question={question}
+        images={stateMessage.optionImages}
+        voteCounts={stateMessage.voteCounts}
+        totalResponses={stateMessage.totalResponses}
+        showResults={stateMessage.resultsVisible}
+        revealCorrectOptionIds={revealChoice?.correctOptionIds ?? []}
+      />
+    );
+  }
   return question.kind === "number" ? (
     <NumberResults
       question={question}
@@ -1219,6 +1260,197 @@ function HostPreviewChoiceResults(props: {
           <div className="host-preview-result-row" key={option.id}>
             <div className="host-preview-result-top">
               <span>{option.label}</span>
+              <span>
+                {showResults ? (
+                  <>
+                    <FlowInteger value={votes} /> votes (<FlowInteger value={percent} />%)
+                  </>
+                ) : (
+                  "--"
+                )}
+              </span>
+            </div>
+            <div className="host-preview-result-track">
+              <div
+                className={`host-preview-result-fill ${leading ? "is-leading" : ""}`}
+                style={{ width: `${showResults ? percent : 0}%` }}
+              />
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function OptionImage(props: { image: PollOptionImage | undefined; label: string }) {
+  const { image, label } = props;
+  if (!image) return <span className="poll-image-missing">{label}</span>;
+  return (
+    <img src={image.url} width={image.width} height={image.height} alt={label} decoding="async" />
+  );
+}
+
+function AudienceImageOptions(props: {
+  question: PollChoiceQuestionPublic | PollChoiceQuestion;
+  images: Record<string, PollOptionImage>;
+  voteCounts: Record<string, number>;
+  totalResponses: number;
+  selectedOptionIds: string[];
+  revealCorrectOptionIds: string[];
+  showResults: boolean;
+  canInteract: boolean;
+  onToggleOption: (optionId: string) => void;
+}) {
+  const {
+    question,
+    images,
+    voteCounts,
+    totalResponses,
+    selectedOptionIds,
+    revealCorrectOptionIds,
+    showResults,
+    canInteract,
+    onToggleOption,
+  } = props;
+  const denominator = Math.max(1, totalResponses);
+  const isRevealed = revealCorrectOptionIds.length > 0;
+  const isLandscape = isLandscapeImageSet(Object.values(images));
+
+  return (
+    <div className={`audience-image-grid ${isLandscape ? "is-landscape" : ""}`}>
+      {question.options.map((option, index) => {
+        const votes = voteCounts[option.id] ?? 0;
+        const percent = Math.round((votes / denominator) * 100);
+        const checked = selectedOptionIds.includes(option.id);
+        const isCorrectOption = revealCorrectOptionIds.includes(option.id);
+        const feedback = isRevealed ? getAudienceOptionFeedback(checked, isCorrectOption) : null;
+        return (
+          <button
+            type="button"
+            key={option.id}
+            className={`audience-image-card ${checked ? "is-selected" : ""} ${
+              isRevealed && !isCorrectOption ? "is-faded" : ""
+            } ${feedback ? `feedback-${feedback}` : ""}`}
+            onClick={() => onToggleOption(option.id)}
+            disabled={!canInteract}
+          >
+            <OptionImage image={images[option.id]} label={option.label} />
+            <span className="audience-image-meta">
+              <span className="audience-option-left">
+                <small>Option</small>
+                <strong>{String.fromCharCode(65 + (index % 26))}</strong>
+              </span>
+              <span className="audience-option-right">
+                {showResults ? (
+                  <span>
+                    <FlowInteger value={percent} />%
+                  </span>
+                ) : null}
+                {feedback === "selected-correct" ? (
+                  <CheckCircle2 size={16} strokeWidth={2.2} aria-label="Correct" />
+                ) : null}
+                {feedback === "missed-correct" ? (
+                  <span className="audience-option-badge badge-missed-correct">Correct</span>
+                ) : null}
+                {feedback === "selected-wrong" ? (
+                  <span className="audience-option-badge badge-selected-wrong">Your choice</span>
+                ) : null}
+              </span>
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function ProjectorImageResults(props: {
+  question: PollChoiceQuestionPublic | PollChoiceQuestion;
+  images: Record<string, PollOptionImage>;
+  voteCounts: Record<string, number>;
+  totalResponses: number;
+  showResults: boolean;
+  revealCorrectOptionIds: string[];
+}) {
+  const { question, images, voteCounts, totalResponses, showResults, revealCorrectOptionIds } =
+    props;
+  const denominator = Math.max(1, totalResponses);
+  const maxVotes = Math.max(...question.options.map((option) => voteCounts[option.id] ?? 0), 0);
+  const isRevealed = revealCorrectOptionIds.length > 0;
+
+  return (
+    <div className="projector-image-results">
+      {question.options.map((option, index) => {
+        const votes = voteCounts[option.id] ?? 0;
+        const percent = showResults ? Math.round((votes / denominator) * 100) : 0;
+        const isLeading = votes > 0 && votes === maxVotes;
+        const isWinner = revealCorrectOptionIds.includes(option.id);
+
+        return (
+          <div
+            className={`projector-image-option ${isRevealed && !isWinner ? "is-faded" : ""}`}
+            key={option.id}
+          >
+            <div className="projector-bar-topline">
+              <span className={`projector-bar-label ${isWinner ? "is-correct" : ""}`}>
+                Option {String.fromCharCode(65 + (index % 26))}
+              </span>
+              <span>
+                {showResults ? (
+                  <>
+                    <FlowInteger value={percent} />% (<FlowInteger value={votes} />)
+                  </>
+                ) : (
+                  "--"
+                )}
+              </span>
+            </div>
+            <div className="projector-image-stack">
+              <OptionImage image={images[option.id]} label={option.label} />
+              <div className="projector-bar-track">
+                <div
+                  className={`projector-bar-fill ${isLeading ? "is-leading" : ""}`}
+                  style={{ width: `${percent}%` }}
+                >
+                  <span className="projector-bar-icon">{String.fromCharCode(97 + (index % 26))}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function HostPreviewImageResults(props: {
+  question: PollChoiceQuestionPublic | PollChoiceQuestion;
+  images: Record<string, PollOptionImage>;
+  voteCounts: Record<string, number>;
+  totalResponses: number;
+  showResults: boolean;
+  correctOptionIds: string[];
+}) {
+  const { question, images, voteCounts, totalResponses, showResults, correctOptionIds } = props;
+  const denominator = Math.max(1, totalResponses);
+  const maxVotes = Math.max(...question.options.map((option) => voteCounts[option.id] ?? 0), 0);
+
+  return (
+    <div className="host-preview-image-results">
+      {question.options.map((option, index) => {
+        const votes = voteCounts[option.id] ?? 0;
+        const percent = Math.round((votes / denominator) * 100);
+        const leading = votes > 0 && votes === maxVotes;
+        const isCorrect = correctOptionIds.includes(option.id);
+        return (
+          <div className={`host-preview-image-option ${isCorrect ? "is-correct" : ""}`} key={option.id}>
+            <OptionImage image={images[option.id]} label={option.label} />
+            <div className="host-preview-result-top">
+              <span>
+                Option {String.fromCharCode(65 + (index % 26))}
+                {isCorrect ? " ✓" : ""}
+              </span>
               <span>
                 {showResults ? (
                   <>
