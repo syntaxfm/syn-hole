@@ -418,6 +418,66 @@ a {
   color: color-mix(in srgb, var(--text) 64%, transparent);
 }
 
+/* Two-way pick on the join screen: native radios styled as one segmented control. */
+.play-mode-toggle {
+  margin: 0;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+
+  label {
+    position: relative;
+    display: grid;
+    place-items: center;
+    padding: 8px 10px;
+    border-radius: 8px;
+    font-weight: 700;
+    color: var(--muted);
+    cursor: pointer;
+    transition:
+      background-color 160ms var(--ease-out),
+      color 160ms var(--ease-out),
+      scale 120ms var(--ease-out);
+
+    &:active {
+      scale: 0.97;
+    }
+
+    &:has(:checked) {
+      background: var(--surface);
+      color: var(--text);
+      box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 14%, transparent);
+    }
+
+    &:has(:focus-visible) {
+      outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+      outline-offset: 1px;
+    }
+  }
+
+  input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+  }
+}
+
+.play-mode-chip {
+  color: var(--text);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .play-mode-toggle label {
+    transition-duration: 1ms;
+  }
+}
+
 .error {
   color: color-mix(in srgb, var(--danger) 58%, var(--text));
   background: color-mix(in srgb, var(--danger) 7%, var(--surface));
@@ -604,6 +664,14 @@ button:disabled {
   padding: 10px 11px;
   display: grid;
   gap: 4px;
+}
+
+.number-winner-group {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
 }
 
 .results {

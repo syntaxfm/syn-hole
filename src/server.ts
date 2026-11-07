@@ -97,6 +97,16 @@ export default {
       );
     }
 
+    // The join screen needs these before the player connects.
+    const roomSettingsMatch = url.pathname.match(/^\/api\/rooms\/([^/]+)\/settings$/);
+    if (roomSettingsMatch && request.method === "GET") {
+      const roomName = decodeURIComponent(roomSettingsMatch[1]);
+      if (!isSafeKeySegment(roomName)) {
+        return Response.json({ error: "Invalid room name." }, { status: 400 });
+      }
+      return fetchRoom(env, roomName, "/settings");
+    }
+
     const pollImageMatch = url.pathname.match(/^\/api\/images\/([^/]+)\/([^/]+)\/([^/]+)$/);
     if (pollImageMatch && request.method === "GET") {
       return servePollImage(
@@ -194,6 +204,14 @@ async function handleAdminApi(request: Request, env: Env, url: URL): Promise<Res
 
   if (roomPath === "/reset" && request.method === "POST") {
     return fetchRoom(env, roomName, "/reset", { method: "POST" });
+  }
+
+  if (roomPath === "/settings" && request.method === "PUT") {
+    return fetchRoom(env, roomName, "/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: await request.text(),
+    });
   }
 
   if (roomPath === "/questions" && request.method === "GET") {

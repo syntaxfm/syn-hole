@@ -2,16 +2,20 @@ import { Server } from "partyserver";
 import type { Connection, ConnectionContext } from "partyserver";
 import starterQuestionsData from "./data/questions";
 import { deleteUnusedRoomImages, listRoomImages, loadOptionImages } from "./poll-images";
+import { DEFAULT_PLAY_MODE, PLAY_MODES, isPlayMode, parseRoomSettings } from "./utils/play-mode";
 import { parseQuestion, parseQuestionList } from "./utils/questions";
 import type {
   IncomingMessage,
+  NumberWinner,
   OutgoingMessage,
+  PlayMode,
   PollOptionImage,
   PollPhase,
   PollQuestion,
   PollQuestionPublic,
   PollRole,
   RoomQuestionsResponse,
+  RoomSettings,
   VoteCounts,
 } from "./types";
 
@@ -32,6 +36,8 @@ export class PollRoom extends Server<Env> {
   private readonly phaseByQuestionId = new Map<string, PollPhase>();
   private readonly votesByQuestionId = new Map<string, Map<string, string[]>>();
   private optionImages: Record<string, PollOptionImage> = {};
+  private askPlayMode = false;
+  private readonly playModeByVoterId = new Map<string, PlayMode>();
   private stateLoaded = false;
   private loadStatePromise: Promise<void> | null = null;
 
@@ -55,6 +61,30 @@ export class PollRoom extends Server<Env> {
 
     if (url.pathname.endsWith("/questions") && request.method === "PUT") {
       return this.handleReplaceQuestions(request);
+    }
+
+    if (url.pathname.endsWith("/settings") && request.method === "GET") {
+      const settings: RoomSettings = { askPlayMode: this.askPlayMode };
+      return Response.json(settings, { headers: { "cache-control": "no-store" } });
+    }
+
+    if (url.pathname.endsWith("/settings") && request.method === "PUT") {
+      let settings: RoomSettings;
+      try {
+        settings = parseRoomSettings(await request.json());
+      } catch (error) {
+        return Response.json(
+          { error: error instanceof Error ? error.message : "Invalid settings." },
+          { status: 400 }
+        );
+      }
+      this.askPlayMode = settings.askPlayMode;
+      this.sql`
+        INSERT INTO room_meta (key, value) VALUES ('askPlayMode', ${settings.askPlayMode ? "1" : "0"})
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+      `;
+      this.broadcastState();
+      return Response.json(settings);
     }
 
     if (url.pathname.endsWith("/stats") && request.method === "GET") {
@@ -107,6 +137,8 @@ export class PollRoom extends Server<Env> {
       role === "audience" ? sanitizeAudienceName(url.searchParams.get("name")) : null;
 
     conn.setState({ role, voterId, displayName });
+    const playMode = url.searchParams.get("playMode");
+    if (voterId && isPlayMode(playMode)) this.setPlayMode(voterId, playMode);
     this.broadcastState();
   }
 
@@ -418,7 +450,6 @@ export class PollRoom extends Server<Env> {
     const yourNumberGuess =
       question?.kind === "number" ? parseStoredNumberGuess(question, yourSelection) : null;
     const canRevealCorrect = role === "host" || phase === "revealed";
-    const winnerResult = question?.kind === "number" ? this.getNumberWinnerResult(question) : null;
     const reveal =
       canRevealCorrect && question
         ? question.kind === "choice"
@@ -433,13 +464,11 @@ export class PollRoom extends Server<Env> {
           : {
               kind: "number" as const,
               correctNumber: question.correctNumber,
-              winningGuess: winnerResult?.winningGuess ?? null,
-              winnerCount: winnerResult?.winnerCount ?? 0,
+              winners: this.getNumberWinners(question),
               isWinner:
-                role === "audience"
-                  ? winnerResult?.winningGuess !== null &&
-                    yourNumberGuess !== null &&
-                    yourNumberGuess === winnerResult?.winningGuess
+                role === "audience" && voterId
+                  ? yourNumberGuess !== null &&
+                    yourNumberGuess === this.getWinningGuessForVoter(question, voterId)
                   : undefined,
             }
         : null;
@@ -454,6 +483,7 @@ export class PollRoom extends Server<Env> {
       phase,
       currentQuestionIndex: this.getCurrentQuestionIndex(),
       totalQuestions: this.questions.length,
+      askPlayMode: this.askPlayMode,
       question: questionPublic,
       optionImages: this.optionImages,
       voteCounts,
@@ -501,7 +531,35 @@ export class PollRoom extends Server<Env> {
     return index === -1 ? 0 : index;
   }
 
-  private getNumberWinnerResult(question: Extract<PollQuestion, { kind: "number" }>): {
+  private getPlayModeForVoter(voterId: string): PlayMode {
+    return this.playModeByVoterId.get(voterId) ?? DEFAULT_PLAY_MODE;
+  }
+
+  /** One winner for the whole room, or one per play mode when the room asks for it. */
+  private getNumberWinners(question: Extract<PollQuestion, { kind: "number" }>): NumberWinner[] {
+    if (!this.askPlayMode) {
+      return [{ playMode: null, ...this.getNumberWinnerResult(question, null) }];
+    }
+    return PLAY_MODES.map((playMode) => ({
+      playMode,
+      ...this.getNumberWinnerResult(question, playMode),
+    }));
+  }
+
+  /** The winning guess this voter is competing against: their group's when the room splits players. */
+  private getWinningGuessForVoter(
+    question: Extract<PollQuestion, { kind: "number" }>,
+    voterId: string
+  ): number | null {
+    const playMode = this.askPlayMode ? this.getPlayModeForVoter(voterId) : null;
+    return this.getNumberWinnerResult(question, playMode).winningGuess;
+  }
+
+  /** Closest guess without going over, among everyone or only players in one play mode. */
+  private getNumberWinnerResult(
+    question: Extract<PollQuestion, { kind: "number" }>,
+    playMode: PlayMode | null
+  ): {
     winningGuess: number | null;
     winnerCount: number;
   } {
@@ -509,9 +567,9 @@ export class PollRoom extends Server<Env> {
     let winningGuess: number | null = null;
     let winnerCount = 0;
 
-    const allSelections = Array.from(votesForQuestion.values());
-    for (let index = 0; index < allSelections.length; index += 1) {
-      const guess = parseStoredNumberGuess(question, allSelections[index]);
+    for (const [voterId, selection] of votesForQuestion) {
+      if (playMode !== null && this.getPlayModeForVoter(voterId) !== playMode) continue;
+      const guess = parseStoredNumberGuess(question, selection);
       if (guess === null || guess > question.correctNumber) continue;
       if (winningGuess === null || guess > winningGuess) {
         winningGuess = guess;
@@ -568,11 +626,8 @@ export class PollRoom extends Server<Env> {
       const guess = parseStoredNumberGuess(question, selection);
       if (guess === null) continue;
       answered += 1;
-      if (phase === "revealed") {
-        const winnerResult = this.getNumberWinnerResult(question);
-        if (winnerResult.winningGuess !== null && guess === winnerResult.winningGuess) {
-          correct += 1;
-        }
+      if (phase === "revealed" && guess === this.getWinningGuessForVoter(question, voterId)) {
+        correct += 1;
       }
     }
 
@@ -620,6 +675,18 @@ export class PollRoom extends Server<Env> {
       storedCurrentId && this.getQuestion(storedCurrentId)
         ? storedCurrentId
         : (this.questions[0]?.id ?? null);
+
+    const askPlayModeRows = this.sql<{ value: string }>`
+      SELECT value FROM room_meta WHERE key = 'askPlayMode' LIMIT 1
+    `;
+    this.askPlayMode = askPlayModeRows[0]?.value === "1";
+
+    this.playModeByVoterId.clear();
+    for (const row of this.sql<{ voter_id: string; play_mode: string }>`
+      SELECT voter_id, play_mode FROM room_player
+    `) {
+      if (isPlayMode(row.play_mode)) this.playModeByVoterId.set(row.voter_id, row.play_mode);
+    }
 
     const phaseRows = this.sql<{ question_id: string; phase: string }>`
       SELECT question_id, phase FROM room_phase
@@ -678,6 +745,12 @@ export class PollRoom extends Server<Env> {
         voter_id TEXT NOT NULL,
         option_ids TEXT NOT NULL,
         PRIMARY KEY (question_id, voter_id)
+      )
+    `;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS room_player (
+        voter_id TEXT PRIMARY KEY,
+        play_mode TEXT NOT NULL
       )
     `;
   }
@@ -766,6 +839,16 @@ export class PollRoom extends Server<Env> {
       INSERT INTO room_phase (question_id, phase)
       VALUES (${questionId}, ${phase})
       ON CONFLICT(question_id) DO UPDATE SET phase = excluded.phase
+    `;
+  }
+
+  private setPlayMode(voterId: string, playMode: PlayMode) {
+    if (this.playModeByVoterId.get(voterId) === playMode) return;
+    this.playModeByVoterId.set(voterId, playMode);
+    this.sql`
+      INSERT INTO room_player (voter_id, play_mode)
+      VALUES (${voterId}, ${playMode})
+      ON CONFLICT(voter_id) DO UPDATE SET play_mode = excluded.play_mode
     `;
   }
 

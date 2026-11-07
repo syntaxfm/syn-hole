@@ -17,7 +17,9 @@ import {
 } from "lucide-react";
 import type {
   IncomingMessage,
+  NumberWinner,
   OutgoingMessage,
+  PlayMode,
   PollChoiceQuestion,
   PollChoiceQuestionPublic,
   PollNumberQuestion,
@@ -25,6 +27,15 @@ import type {
   PollOptionImage,
   PollRole,
 } from "~/types";
+import {
+  DEFAULT_PLAY_MODE,
+  PLAY_MODES,
+  PLAY_MODE_LABEL,
+  getRoomSettingsEndpoint,
+  parseRoomSettings,
+  readPlayMode,
+  savePlayMode,
+} from "~/utils/play-mode";
 import { isImageQuestion, isLandscapeImageSet } from "~/utils/poll-images";
 
 type ViewMode = "audience" | "host" | "projector";
@@ -90,7 +101,16 @@ export function PollPage(props: { view: ViewMode; room?: string }) {
     role === "audience" ? readAudienceName() : ""
   );
   const [pendingAudienceName, setPendingAudienceName] = useState(audienceName);
+  const [askPlayModeBeforeJoin, setAskPlayModeBeforeJoin] = useState(false);
+  const askPlayMode = role === "audience" && (stateMessage?.askPlayMode ?? askPlayModeBeforeJoin);
+  const [playMode, setPlayMode] = useState<PlayMode | null>(() =>
+    role === "audience" ? readPlayMode(room) : null
+  );
+  const [pendingPlayMode, setPendingPlayMode] = useState<PlayMode>(playMode ?? DEFAULT_PLAY_MODE);
+  const [isEditingIdentity, setIsEditingIdentity] = useState(false);
   const needsAudienceName = role === "audience" && audienceName.trim().length === 0;
+  const showIdentityCheck =
+    needsAudienceName || (askPlayMode && playMode === null) || isEditingIdentity;
   const canConnect =
     role === "host"
       ? hostKey.trim().length > 0
@@ -98,16 +118,21 @@ export function PollPage(props: { view: ViewMode; room?: string }) {
         ? audienceName.trim().length > 0
         : true;
 
+  // The socket keeps the query function from its first render, so it reads the latest values from here.
+  const connectionQuery = useRef<Record<string, string | undefined>>({});
+  connectionQuery.current = {
+    role,
+    voterId: role === "audience" ? audienceVoterId : undefined,
+    name: role === "audience" ? audienceName : undefined,
+    playMode: askPlayMode && playMode ? playMode : undefined,
+    hostKey: role === "host" ? hostKey.trim() : undefined,
+  };
+
   const socket = usePartySocket({
     enabled: canConnect,
     room,
     party: PARTY_NAME,
-    query: () => ({
-      role,
-      voterId: role === "audience" ? audienceVoterId : undefined,
-      name: role === "audience" ? audienceName : undefined,
-      hostKey: role === "host" ? hostKey.trim() : undefined,
-    }),
+    query: () => connectionQuery.current,
     onOpen() {
       setStatus("connected");
       setErrorMessage(null);
@@ -160,6 +185,30 @@ export function PollPage(props: { view: ViewMode; room?: string }) {
     if (!hostKey.trim()) return;
     saveHostKey(hostKey.trim());
   }, [hostKey]);
+
+  useEffect(() => {
+    if (role !== "audience") return;
+    let cancelled = false;
+    fetch(getRoomSettingsEndpoint(room), { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+        const settings = parseRoomSettings(await response.json());
+        if (!cancelled) setAskPlayModeBeforeJoin(settings.askPlayMode);
+      })
+      .catch((settingsError: unknown) => console.error("Failed to load room settings", settingsError));
+    return () => {
+      cancelled = true;
+    };
+  }, [role, room]);
+
+  // A changed name or play mode only reaches the room on a fresh connection.
+  const identityKey = `${audienceName}|${playMode ?? ""}`;
+  const connectedIdentityKey = useRef(identityKey);
+  useEffect(() => {
+    if (connectedIdentityKey.current === identityKey) return;
+    connectedIdentityKey.current = identityKey;
+    if (socket.readyState === WebSocket.OPEN) socket.reconnect();
+  }, [identityKey, socket]);
 
   useEffect(() => {
     if (role !== "audience" || !needsAudienceName) return;
@@ -299,20 +348,31 @@ export function PollPage(props: { view: ViewMode; room?: string }) {
     sendMessage({ type: "vote-number", value: parsed });
   }
 
-  function submitAudienceName(event: FormEvent<HTMLFormElement>) {
+  function submitIdentity(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const nextName =
       pendingAudienceName.replace(/\s+/g, " ").trim().slice(0, 80) || "Anon from somewhere";
     setAudienceName(nextName);
     setPendingAudienceName(nextName);
     saveAudienceName(nextName);
+    if (askPlayMode) {
+      setPlayMode(pendingPlayMode);
+      savePlayMode(room, pendingPlayMode);
+    }
+    setIsEditingIdentity(false);
+  }
+
+  function editIdentity() {
+    setPendingAudienceName(audienceName);
+    setPendingPlayMode(playMode ?? DEFAULT_PLAY_MODE);
+    setIsEditingIdentity(true);
   }
 
   return (
     <main className={`app app-${view} app-shell`}>
-      {needsAudienceName ? (
+      {showIdentityCheck ? (
         <div className="name-overlay">
-          <form className="name-modal" onSubmit={submitAudienceName}>
+          <form className="name-modal" onSubmit={submitIdentity}>
             <span className="name-modal-kicker">Identity check</span>
             <h2>Ready to sync?</h2>
             <p className="muted">Enter your display name to join room {room}.</p>
@@ -323,6 +383,22 @@ export function PollPage(props: { view: ViewMode; room?: string }) {
               placeholder="Anon from somewhere"
               autoFocus
             />
+            {askPlayMode ? (
+              <fieldset className="play-mode-toggle" aria-label="Where are you playing?">
+                {PLAY_MODES.map((mode) => (
+                  <label key={mode}>
+                    <input
+                      type="radio"
+                      name="playMode"
+                      value={mode}
+                      checked={pendingPlayMode === mode}
+                      onChange={() => setPendingPlayMode(mode)}
+                    />
+                    {PLAY_MODE_LABEL[mode]}
+                  </label>
+                ))}
+              </fieldset>
+            ) : null}
             <button type="submit">Join Session</button>
           </form>
         </div>
@@ -339,6 +415,15 @@ export function PollPage(props: { view: ViewMode; room?: string }) {
                     <FlowInteger value={stateMessage.participants} />
                   </strong>
                 </span>
+                {askPlayMode && playMode ? (
+                  <button
+                    type="button"
+                    className="live-chip live-chip-connected live-chip-compact play-mode-chip"
+                    onClick={editIdentity}
+                  >
+                    {PLAY_MODE_LABEL[playMode]}
+                  </button>
+                ) : null}
               </div>
             ) : null}
           </div>
@@ -1623,19 +1708,9 @@ function NumberResults(props: {
           <p className="muted">
             Target number: <FlowNumber value={numberReveal.correctNumber} />
           </p>
-          {numberReveal.winningGuess === null ? (
-            <p className="muted">No winners this round (all guesses were over).</p>
-          ) : (
-            <>
-              <p className="muted">
-                Winning guess: <FlowNumber value={numberReveal.winningGuess} />
-              </p>
-              <p className="muted">
-                Winner{numberReveal.winnerCount === 1 ? "" : "s"}:{" "}
-                <FlowInteger value={numberReveal.winnerCount} />
-              </p>
-            </>
-          )}
+          {numberReveal.winners.map((winner) => (
+            <NumberWinnerResult key={winner.playMode ?? "everyone"} winner={winner} />
+          ))}
           {numberReveal.isWinner ? <p className="host-lock-chip host-lock-open">You won</p> : null}
         </div>
       ) : (
@@ -1647,6 +1722,38 @@ function NumberResults(props: {
         </p>
       ) : null}
     </div>
+  );
+}
+
+function NumberWinnerResult(props: { winner: NumberWinner }) {
+  const { winner } = props;
+  if (winner.playMode === null) {
+    return winner.winningGuess === null ? (
+      <p className="muted">No winners this round (all guesses were over).</p>
+    ) : (
+      <>
+        <p className="muted">
+          Winning guess: <FlowNumber value={winner.winningGuess} />
+        </p>
+        <p className="muted">
+          Winner{winner.winnerCount === 1 ? "" : "s"}: <FlowInteger value={winner.winnerCount} />
+        </p>
+      </>
+    );
+  }
+
+  return (
+    <p className="number-winner-group">
+      <strong>{PLAY_MODE_LABEL[winner.playMode]}</strong>
+      {winner.winningGuess === null ? (
+        <span className="muted">No winner</span>
+      ) : (
+        <span className="muted">
+          <FlowNumber value={winner.winningGuess} /> · <FlowInteger value={winner.winnerCount} /> winner
+          {winner.winnerCount === 1 ? "" : "s"}
+        </span>
+      )}
+    </p>
   );
 }
 

@@ -13,3 +13,4 @@ yarn-error.log*
 .env
 .env.*
 .dev.vars
+.dex/

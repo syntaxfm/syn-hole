@@ -10,8 +10,14 @@ import type {
   RoomQuestionsResponse,
   StoredOptionImage,
 } from "~/types";
-import { adminFetch, getRoomQuestionsEndpoint, readAdminKey } from "~/utils/admin-api";
+import {
+  adminFetch,
+  getAdminRoomSettingsEndpoint,
+  getRoomQuestionsEndpoint,
+  readAdminKey,
+} from "~/utils/admin-api";
 import { readErrorMessage } from "~/utils/files";
+import { getRoomSettingsEndpoint, parseRoomSettings } from "~/utils/play-mode";
 import {
   changeQuestionType,
   createOption,
@@ -39,10 +45,13 @@ const SAVE_STATE_LABEL: Record<SaveState, string> = {
 
 export function RoomQuestionsEditor(props: { room: string }) {
   const { room } = props;
-  const [adminKey] = useState(() => readAdminKey());
+  // Read after mount: the server can't see the stored key, and both renders must match.
+  const [storedAdminKey, setStoredAdminKey] = useState<string | null>(null);
+  const adminKey = storedAdminKey ?? "";
   const [questions, setQuestions] = useState<PollQuestion[] | null>(null);
   const [images, setImages] = useState<RoomOptionImages>({});
   const [otherRooms, setOtherRooms] = useState<string[]>([]);
+  const [askPlayMode, setAskPlayMode] = useState<boolean | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const [error, setError] = useState<string | null>(null);
   const latestQuestions = useRef<PollQuestion[]>([]);
@@ -59,6 +68,10 @@ export function RoomQuestionsEditor(props: { room: string }) {
     setImages(data.images);
     setSaveState("saved");
   }
+
+  useEffect(() => {
+    setStoredAdminKey(readAdminKey());
+  }, []);
 
   useEffect(() => {
     if (!adminKey) return;
@@ -78,7 +91,30 @@ export function RoomQuestionsEditor(props: { room: string }) {
         setOtherRooms(Array.from(names).sort());
       })
       .catch((roomsError: unknown) => console.error("Failed to load rooms", roomsError));
+    fetch(getRoomSettingsEndpoint(room), { cache: "no-store" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+        setAskPlayMode(parseRoomSettings(await response.json()).askPlayMode);
+      })
+      .catch((settingsError: unknown) => console.error("Failed to load room settings", settingsError));
   }, [room, adminKey]);
+
+  async function changeAskPlayMode(next: boolean) {
+    setAskPlayMode(next);
+    setError(null);
+    try {
+      const response = await adminFetch(getAdminRoomSettingsEndpoint(room), adminKey, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ askPlayMode: next }),
+      });
+      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    } catch (settingsError) {
+      console.error("Failed to save room settings", settingsError);
+      setAskPlayMode(!next);
+      setError("Could not save the room setting.");
+    }
+  }
 
   useEffect(() => {
     if (saveState === "saved") return;
@@ -219,12 +255,23 @@ export function RoomQuestionsEditor(props: { room: string }) {
         ) : null}
       </header>
 
-      {!adminKey ? (
+      {storedAdminKey === "" ? (
         <p className="error">
           <a href="/admin/">Log in to Room Admin</a> first.
         </p>
       ) : null}
       {error ? <p className="error">{error}</p> : null}
+
+      {askPlayMode !== null ? (
+        <label className="question-editor-check">
+          <input
+            type="checkbox"
+            checked={askPlayMode}
+            onChange={(event) => void changeAskPlayMode(event.currentTarget.checked)}
+          />
+          Ask players: in person or online
+        </label>
+      ) : null}
 
       {questions ? (
         <>

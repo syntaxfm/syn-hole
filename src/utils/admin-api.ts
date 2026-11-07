@@ -31,3 +31,7 @@ export function adminFetch(path: string, adminKey: string, options?: RequestInit
 export function getRoomQuestionsEndpoint(room: string): string {
   return `/api/admin/rooms/${encodeURIComponent(room)}/questions`;
 }
+
+export function getAdminRoomSettingsEndpoint(room: string): string {
+  return `/api/admin/rooms/${encodeURIComponent(room)}/settings`;
+}

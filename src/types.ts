@@ -61,6 +61,21 @@ export type PollQuestionPublic = PollChoiceQuestionPublic | PollNumberQuestionPu
 
 export type VoteCounts = Record<string, number>;
 
+/** Where an audience member is playing from. Rooms can ask so each group gets its own winners. */
+export type PlayMode = "in-person" | "online";
+
+export type RoomSettings = {
+  /** Ask each player on the join screen whether they're in person or online. */
+  askPlayMode: boolean;
+};
+
+/** Closest guess without going over. playMode is null when the room doesn't split players. */
+export type NumberWinner = {
+  playMode: PlayMode | null;
+  winningGuess: number | null;
+  winnerCount: number;
+};
+
 export type IncomingMessage =
   | {
       type: "vote";
@@ -95,6 +110,7 @@ export type OutgoingMessage =
       phase: PollPhase;
       currentQuestionIndex: number;
       totalQuestions: number;
+      askPlayMode: boolean;
       question: PollQuestionPublic | null;
       /** Images for the current question, keyed by option id. Empty unless display is "image". */
       optionImages: Record<string, PollOptionImage>;
@@ -120,8 +136,8 @@ export type OutgoingMessage =
         | {
             kind: "number";
             correctNumber: number;
-            winningGuess: number | null;
-            winnerCount: number;
+            /** One entry, or one per play mode when the room asks for it. */
+            winners: NumberWinner[];
             isWinner?: boolean;
           }
         | null;
