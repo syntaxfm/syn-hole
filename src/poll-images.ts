@@ -1,40 +1,52 @@
-import type {
-  AdminPollImageQuestion,
-  PollOptionImage,
-  PollQuestion,
-} from "./types";
+import type { PollOptionImage, PollQuestion, RoomOptionImages } from "./types";
 import {
   MAX_POLL_IMAGE_BYTES,
   getPollImageKey,
+  getRoomImagePrefix,
   isImageQuestion,
   isPollImageContentType,
-  isPollImageId,
+  isSafeKeySegment,
   parsePollImageDimension,
+  parsePollImageKey,
   toPollOptionImage,
 } from "./utils/poll-images";
 
-function isImageQuestionOption(
-  questions: PollQuestion[],
-  questionId: string,
-  optionId: string
-): boolean {
-  if (!isPollImageId(questionId) || !isPollImageId(optionId)) return false;
-  const question = questions.find((item) => item.id === questionId);
-  if (!question || !isImageQuestion(question)) return false;
-  return question.options.some((option) => option.id === optionId);
+function areSafeSegments(...segments: string[]): boolean {
+  return segments.every(isSafeKeySegment);
+}
+
+async function listRoomObjects(bucket: R2Bucket, room: string): Promise<R2Object[]> {
+  const objects: R2Object[] = [];
+  let cursor: string | undefined;
+  do {
+    // The runtime honors `include` at our compatibility date; the default
+    // workers-types entry point predates it, hence the widened type.
+    const options: R2ListOptions & { include: Array<"customMetadata"> } = {
+      prefix: getRoomImagePrefix(room),
+      include: ["customMetadata"],
+      cursor,
+    };
+    const page = await bucket.list(options);
+    objects.push(...page.objects);
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  return objects;
 }
 
 /** Reads every option image for one question. A missing or unreadable image is left out. */
 export async function loadOptionImages(
   bucket: R2Bucket,
+  room: string,
   question: PollQuestion | null
 ): Promise<Record<string, PollOptionImage>> {
-  if (!question || !isImageQuestion(question)) return {};
+  if (!question || !isImageQuestion(question) || !isSafeKeySegment(room)) return {};
 
   const entries = await Promise.all(
     question.options.map(async (option) => {
-      const object = await bucket.head(getPollImageKey(question.id, option.id));
-      const image = object ? toPollOptionImage(question.id, option.id, object.customMetadata) : null;
+      const object = await bucket.head(getPollImageKey(room, question.id, option.id));
+      const image = object
+        ? toPollOptionImage(room, question.id, option.id, object.customMetadata)
+        : null;
       return [option.id, image] as const;
     })
   );
@@ -46,15 +58,68 @@ export async function loadOptionImages(
   return images;
 }
 
+export async function listRoomImages(bucket: R2Bucket, room: string): Promise<RoomOptionImages> {
+  if (!isSafeKeySegment(room)) return {};
+  const images: RoomOptionImages = {};
+  for (const object of await listRoomObjects(bucket, room)) {
+    const parsed = parsePollImageKey(room, object.key);
+    if (!parsed) continue;
+    const image = toPollOptionImage(room, parsed.questionId, parsed.optionId, object.customMetadata);
+    if (!image) continue;
+    images[parsed.questionId] ??= {};
+    images[parsed.questionId][parsed.optionId] = { ...image, size: object.size };
+  }
+  return images;
+}
+
+/** Removes uploads whose question or option no longer exists, or is no longer an image question. */
+export async function deleteUnusedRoomImages(
+  bucket: R2Bucket,
+  room: string,
+  questions: PollQuestion[]
+): Promise<void> {
+  if (!isSafeKeySegment(room)) return;
+  const usedKeys = new Set<string>();
+  for (const question of questions) {
+    if (!isImageQuestion(question)) continue;
+    for (const option of question.options) {
+      usedKeys.add(getPollImageKey(room, question.id, option.id));
+    }
+  }
+  const unusedKeys = (await listRoomObjects(bucket, room))
+    .map((object) => object.key)
+    .filter((key) => !usedKeys.has(key));
+  if (unusedKeys.length > 0) await bucket.delete(unusedKeys);
+}
+
+/** Makes `toRoom`'s images an exact copy of `fromRoom`'s. */
+export async function copyRoomImages(bucket: R2Bucket, fromRoom: string, toRoom: string): Promise<void> {
+  if (!areSafeSegments(fromRoom, toRoom)) throw new Error("Invalid room name for images.");
+
+  const existingKeys = (await listRoomObjects(bucket, toRoom)).map((object) => object.key);
+  if (existingKeys.length > 0) await bucket.delete(existingKeys);
+
+  for (const object of await listRoomObjects(bucket, fromRoom)) {
+    const parsed = parsePollImageKey(fromRoom, object.key);
+    if (!parsed) continue;
+    const source = await bucket.get(object.key);
+    if (!source) continue;
+    await bucket.put(getPollImageKey(toRoom, parsed.questionId, parsed.optionId), source.body, {
+      httpMetadata: source.httpMetadata,
+      customMetadata: source.customMetadata,
+    });
+  }
+}
+
 export async function servePollImage(
   bucket: R2Bucket,
-  questions: PollQuestion[],
+  room: string,
   questionId: string,
   optionId: string
 ): Promise<Response> {
-  if (!isImageQuestionOption(questions, questionId, optionId)) return new Response("Not Found", { status: 404 });
+  if (!areSafeSegments(room, questionId, optionId)) return new Response("Not Found", { status: 404 });
 
-  const object = await bucket.get(getPollImageKey(questionId, optionId));
+  const object = await bucket.get(getPollImageKey(room, questionId, optionId));
   if (!object) return new Response("Not Found", { status: 404 });
 
   const headers = new Headers();
@@ -65,49 +130,19 @@ export async function servePollImage(
   return new Response(object.body, { headers });
 }
 
-export async function listAdminPollImages(
-  bucket: R2Bucket,
-  questions: PollQuestion[]
-): Promise<AdminPollImageQuestion[]> {
-  const imageQuestions: AdminPollImageQuestion[] = [];
-
-  for (let index = 0; index < questions.length; index += 1) {
-    const question = questions[index];
-    if (!isImageQuestion(question)) continue;
-
-    const options = await Promise.all(
-      question.options.map(async (option) => {
-        const object = await bucket.head(getPollImageKey(question.id, option.id));
-        const image = object ? toPollOptionImage(question.id, option.id, object.customMetadata) : null;
-        return {
-          id: option.id,
-          label: option.label,
-          image: image && object ? { ...image, size: object.size } : null,
-        };
-      })
-    );
-
-    imageQuestions.push({
-      index,
-      id: question.id,
-      prompt: question.prompt,
-      correctOptionIds: [...question.correctOptionIds],
-      options,
-    });
-  }
-
-  return imageQuestions;
-}
-
+/**
+ * Uploads may land before the editor's next autosave includes a new option,
+ * so only the key format is checked here; deleteUnusedRoomImages tidies orphans on save.
+ */
 export async function uploadPollImage(
   bucket: R2Bucket,
-  questions: PollQuestion[],
+  room: string,
   questionId: string,
   optionId: string,
   request: Request
 ): Promise<Response> {
-  if (!isImageQuestionOption(questions, questionId, optionId)) {
-    return Response.json({ error: "Unknown image question or option." }, { status: 404 });
+  if (!areSafeSegments(room, questionId, optionId)) {
+    return Response.json({ error: "Invalid room, question or option id." }, { status: 400 });
   }
 
   const contentType = (request.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();
@@ -134,29 +169,25 @@ export async function uploadPollImage(
     return Response.json({ error: "Image is larger than 10 MB." }, { status: 413 });
   }
 
-  const uploadedAt = new Date().toISOString();
-  await bucket.put(getPollImageKey(questionId, optionId), body, {
+  const customMetadata = { width: String(width), height: String(height), uploadedAt: new Date().toISOString() };
+  await bucket.put(getPollImageKey(room, questionId, optionId), body, {
     httpMetadata: { contentType },
-    customMetadata: { width: String(width), height: String(height), uploadedAt },
+    customMetadata,
   });
 
-  const image = toPollOptionImage(questionId, optionId, {
-    width: String(width),
-    height: String(height),
-    uploadedAt,
-  });
+  const image = toPollOptionImage(room, questionId, optionId, customMetadata);
   return Response.json({ ok: true, image: image ? { ...image, size: body.byteLength } : null });
 }
 
 export async function deletePollImage(
   bucket: R2Bucket,
-  questions: PollQuestion[],
+  room: string,
   questionId: string,
   optionId: string
 ): Promise<Response> {
-  if (!isImageQuestionOption(questions, questionId, optionId)) {
-    return Response.json({ error: "Unknown image question or option." }, { status: 404 });
+  if (!areSafeSegments(room, questionId, optionId)) {
+    return Response.json({ error: "Invalid room, question or option id." }, { status: 400 });
   }
-  await bucket.delete(getPollImageKey(questionId, optionId));
+  await bucket.delete(getPollImageKey(room, questionId, optionId));
   return Response.json({ ok: true });
 }

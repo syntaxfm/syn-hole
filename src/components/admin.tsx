@@ -14,10 +14,9 @@ import {
   Eye,
   EyeOff,
   Shield,
+  ListChecks,
 } from "lucide-react";
-import { AdminPollImages } from "~/components/admin-poll-images";
-
-const ADMIN_KEY_STORAGE_KEY = "syntax-live-admin-key";
+import { adminFetch, readAdminKey, saveAdminKey } from "~/utils/admin-api";
 
 type RoomEntry = {
   name: string;
@@ -42,23 +41,6 @@ type RoomStats = {
     totalVotes: number;
   }>;
 };
-
-function readAdminKey(): string {
-  if (typeof window === "undefined") return "";
-  const params = new URLSearchParams(window.location.search);
-  const urlKey = params.get("adminKey") ?? params.get("key");
-  if (urlKey) {
-    window.localStorage.setItem(ADMIN_KEY_STORAGE_KEY, urlKey);
-    return urlKey;
-  }
-  return window.localStorage.getItem(ADMIN_KEY_STORAGE_KEY) ?? "";
-}
-
-function saveAdminKey(value: string) {
-  if (typeof window !== "undefined") {
-    window.localStorage.setItem(ADMIN_KEY_STORAGE_KEY, value);
-  }
-}
 
 function toDateTimeLocalValue(iso: string): string {
   const date = new Date(iso);
@@ -91,17 +73,6 @@ function formatRoomStartAt(value: string | null): string {
     hour: "numeric",
     minute: "2-digit",
   });
-}
-
-async function adminFetch(path: string, adminKey: string, options?: RequestInit) {
-  const resp = await fetch(path, {
-    ...options,
-    headers: {
-      ...options?.headers,
-      "x-admin-key": adminKey,
-    },
-  });
-  return resp;
 }
 
 export function AdminPage() {
@@ -416,8 +387,6 @@ export function AdminPage() {
         </form>
       </section>
 
-      <AdminPollImages adminKey={adminKey} />
-
       <section className="admin-rooms-section">
         <h3>
           Rooms (<FlowInteger value={rooms.length} />)
@@ -520,6 +489,10 @@ export function AdminPage() {
                     </div>
 
                     <div className="admin-room-actions">
+                      <a className="admin-action-btn" href={`/admin/${encodeURIComponent(room.name)}`}>
+                        <ListChecks size={13} strokeWidth={2} />
+                        Questions
+                      </a>
                       <button
                         type="button"
                         className="admin-action-btn"

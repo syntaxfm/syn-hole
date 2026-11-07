@@ -1,17 +1,17 @@
 import { Server } from "partyserver";
 import type { Connection, ConnectionContext } from "partyserver";
-import questionsData from "./data/questions";
-import { loadOptionImages } from "./poll-images";
-import { isPollImageId } from "./utils/poll-images";
+import starterQuestionsData from "./data/questions";
+import { deleteUnusedRoomImages, listRoomImages, loadOptionImages } from "./poll-images";
+import { parseQuestion, parseQuestionList } from "./utils/questions";
 import type {
   IncomingMessage,
   OutgoingMessage,
-  PollChoiceDisplay,
   PollOptionImage,
   PollPhase,
   PollQuestion,
   PollQuestionPublic,
   PollRole,
+  RoomQuestionsResponse,
   VoteCounts,
 } from "./types";
 
@@ -21,14 +21,16 @@ type PollConnectionState = {
   displayName: string | null;
 };
 
-export const QUESTIONS = validateQuestions(questionsData);
+/** Every room starts with these the first time it loads; after that the room owns its list. */
+export const STARTER_QUESTIONS = parseQuestionList(starterQuestionsData);
 
 export class PollRoom extends Server<Env> {
   static options = { hibernate: true };
 
-  private currentQuestionIndex = 0;
-  private readonly phaseByQuestionIndex = new Map<number, PollPhase>();
-  private readonly votesByQuestionIndex = new Map<number, Map<string, string[]>>();
+  private questions: PollQuestion[] = [];
+  private currentQuestionId: string | null = null;
+  private readonly phaseByQuestionId = new Map<string, PollPhase>();
+  private readonly votesByQuestionId = new Map<string, Map<string, string[]>>();
   private optionImages: Record<string, PollOptionImage> = {};
   private stateLoaded = false;
   private loadStatePromise: Promise<void> | null = null;
@@ -43,6 +45,18 @@ export class PollRoom extends Server<Env> {
       return Response.json({ ok: true });
     }
 
+    if (url.pathname.endsWith("/questions") && request.method === "GET") {
+      const response: RoomQuestionsResponse = {
+        questions: this.questions,
+        images: await listRoomImages(this.env.POLL_IMAGES, this.name),
+      };
+      return Response.json(response, { headers: { "cache-control": "no-store" } });
+    }
+
+    if (url.pathname.endsWith("/questions") && request.method === "PUT") {
+      return this.handleReplaceQuestions(request);
+    }
+
     if (url.pathname.endsWith("/stats") && request.method === "GET") {
       const connections = Array.from(this.getConnections<PollConnectionState>());
       let audienceCount = 0;
@@ -54,44 +68,26 @@ export class PollRoom extends Server<Env> {
         else if (conn.state?.role === "projector") projectorCount++;
       }
 
-      const questionStats: Array<{
-        index: number;
-        id: string;
-        prompt: string;
-        phase: string;
-        totalVotes: number;
-      }> = [];
-      for (let i = 0; i < QUESTIONS.length; i++) {
-        const q = QUESTIONS[i];
-        const votes = this.votesByQuestionIndex.get(i);
-        questionStats.push({
-          index: i,
-          id: q.id,
-          prompt: q.prompt,
-          phase: this.phaseByQuestionIndex.get(i) ?? "idle",
-          totalVotes: votes?.size ?? 0,
-        });
-      }
-
       return Response.json({
         room: this.name,
-        currentQuestionIndex: this.currentQuestionIndex,
-        totalQuestions: QUESTIONS.length,
+        currentQuestionIndex: this.getCurrentQuestionIndex(),
+        totalQuestions: this.questions.length,
         participants: this.getConnectedParticipantCount(),
         audienceCount,
         hostCount,
         projectorCount,
-        questions: questionStats,
+        questions: this.questions.map((question, index) => ({
+          index,
+          id: question.id,
+          prompt: question.prompt,
+          phase: this.phaseByQuestionId.get(question.id) ?? "idle",
+          totalVotes: this.votesByQuestionId.get(question.id)?.size ?? 0,
+        })),
       });
     }
 
     if (url.pathname.endsWith("/reset") && request.method === "POST") {
-      this.currentQuestionIndex = 0;
-      this.phaseByQuestionIndex.clear();
-      this.votesByQuestionIndex.clear();
-      await this.clearPersistedState();
-      await this.refreshOptionImages();
-      this.broadcastState();
+      await this.resetSession();
       return Response.json({ ok: true });
     }
 
@@ -159,6 +155,76 @@ export class PollRoom extends Server<Env> {
     this.broadcastState();
   }
 
+  private async handleReplaceQuestions(request: Request): Promise<Response> {
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return Response.json({ error: "Body must be JSON." }, { status: 400 });
+    }
+    const rawQuestions =
+      body && typeof body === "object" && "questions" in body ? body.questions : undefined;
+
+    let questions: PollQuestion[];
+    try {
+      questions = parseQuestionList(rawQuestions);
+    } catch (error) {
+      return Response.json(
+        { error: error instanceof Error ? error.message : "Invalid questions." },
+        { status: 400 }
+      );
+    }
+
+    this.replaceQuestions(questions);
+    try {
+      await deleteUnusedRoomImages(this.env.POLL_IMAGES, this.name, questions);
+    } catch (error) {
+      // Best effort: leftover images only cost storage and are retried on the next save.
+      console.error("Failed to delete unused room images", error);
+    }
+    await this.refreshOptionImages();
+    this.broadcastState();
+    return Response.json({ ok: true });
+  }
+
+  /** Swaps in a new list, keeping phases and votes for questions and options that still exist. */
+  private replaceQuestions(questions: PollQuestion[]) {
+    this.questions = questions;
+    this.sql`DELETE FROM room_question`;
+    questions.forEach((question, position) => {
+      this.sql`
+        INSERT INTO room_question (position, id, data)
+        VALUES (${position}, ${question.id}, ${JSON.stringify(question)})
+      `;
+    });
+
+    for (const questionId of Array.from(this.phaseByQuestionId.keys())) {
+      if (this.getQuestion(questionId)) continue;
+      this.phaseByQuestionId.delete(questionId);
+      this.sql`DELETE FROM room_phase WHERE question_id = ${questionId}`;
+    }
+
+    for (const [questionId, votes] of Array.from(this.votesByQuestionId.entries())) {
+      const question = this.getQuestion(questionId);
+      for (const [voterId, selection] of Array.from(votes.entries())) {
+        const cleaned = question ? sanitizeStoredSelection(question, selection) : null;
+        if (cleaned && cleaned.join() === selection.join()) continue;
+        if (cleaned) {
+          votes.set(voterId, cleaned);
+        } else {
+          votes.delete(voterId);
+        }
+        this.persistVote(questionId, voterId, cleaned ?? []);
+      }
+      if (votes.size === 0) this.votesByQuestionId.delete(questionId);
+    }
+
+    if (!this.currentQuestionId || !this.getQuestion(this.currentQuestionId)) {
+      this.currentQuestionId = questions[0]?.id ?? null;
+      this.persistCurrentQuestionId();
+    }
+  }
+
   private async handleChoiceVote(conn: Connection<PollConnectionState>, optionIds: string[]) {
     if (conn.state?.role !== "audience") {
       this.sendError(conn, "Only audience clients can submit votes.");
@@ -182,13 +248,13 @@ export class PollRoom extends Server<Env> {
       return;
     }
 
-    const validated = this.validateChoiceSelection(question, optionIds);
+    const validated = validateChoiceSelection(question, optionIds);
     if (validated.ok === false) {
       this.sendError(conn, validated.message);
       return;
     }
 
-    const votesForQuestion = this.getVotesForQuestion(this.currentQuestionIndex);
+    const votesForQuestion = this.getVotesForQuestion(question.id);
 
     if (validated.optionIds.length === 0) {
       votesForQuestion.delete(conn.state.voterId);
@@ -196,7 +262,7 @@ export class PollRoom extends Server<Env> {
       votesForQuestion.set(conn.state.voterId, validated.optionIds);
     }
 
-    await this.persistVote(this.currentQuestionIndex, conn.state.voterId, validated.optionIds);
+    this.persistVote(question.id, conn.state.voterId, validated.optionIds);
     this.broadcastState();
   }
 
@@ -222,23 +288,23 @@ export class PollRoom extends Server<Env> {
       return;
     }
 
-    const validated = this.validateNumberGuess(question, value);
+    const validated = validateNumberGuess(question, value);
     if (validated.ok === false) {
       this.sendError(conn, validated.message);
       return;
     }
 
-    const votesForQuestion = this.getVotesForQuestion(this.currentQuestionIndex);
+    const votesForQuestion = this.getVotesForQuestion(question.id);
     if (validated.value === null) {
       votesForQuestion.delete(conn.state.voterId);
-      await this.persistVote(this.currentQuestionIndex, conn.state.voterId, []);
+      this.persistVote(question.id, conn.state.voterId, []);
       this.broadcastState();
       return;
     }
 
     const storedSelection = [String(validated.value)];
     votesForQuestion.set(conn.state.voterId, storedSelection);
-    await this.persistVote(this.currentQuestionIndex, conn.state.voterId, storedSelection);
+    this.persistVote(question.id, conn.state.voterId, storedSelection);
     this.broadcastState();
   }
 
@@ -247,59 +313,65 @@ export class PollRoom extends Server<Env> {
   ) {
     switch (message.type) {
       case "set-question": {
-        if (!Number.isInteger(message.questionIndex)) return;
-        if (
-          message.questionIndex < 0 ||
-          message.questionIndex >= QUESTIONS.length
-        )
-          return;
-        this.currentQuestionIndex = message.questionIndex;
-        this.phaseByQuestionIndex.set(this.currentQuestionIndex, "open");
-        await this.persistCurrentQuestionIndex();
-        await this.persistPhase(this.currentQuestionIndex, "open");
+        const question = Number.isInteger(message.questionIndex)
+          ? this.questions[message.questionIndex]
+          : undefined;
+        if (!question) return;
+        this.currentQuestionId = question.id;
+        this.setPhase(question.id, "open");
+        this.persistCurrentQuestionId();
         await this.refreshOptionImages();
         this.broadcastState();
         return;
       }
       case "open-voting": {
-        this.phaseByQuestionIndex.set(this.currentQuestionIndex, "open");
-        await this.persistPhase(this.currentQuestionIndex, "open");
+        if (!this.currentQuestionId) return;
+        this.setPhase(this.currentQuestionId, "open");
         this.broadcastState();
         return;
       }
       case "close-voting": {
-        this.phaseByQuestionIndex.set(this.currentQuestionIndex, "closed");
-        await this.persistPhase(this.currentQuestionIndex, "closed");
+        if (!this.currentQuestionId) return;
+        this.setPhase(this.currentQuestionId, "closed");
         this.broadcastState();
         return;
       }
       case "reveal": {
+        if (!this.currentQuestionId) return;
         if (this.getCurrentPhase() === "open") {
-          this.phaseByQuestionIndex.set(this.currentQuestionIndex, "closed");
-          await this.persistPhase(this.currentQuestionIndex, "closed");
+          this.setPhase(this.currentQuestionId, "closed");
           this.broadcastState();
         }
-        this.phaseByQuestionIndex.set(this.currentQuestionIndex, "revealed");
-        await this.persistPhase(this.currentQuestionIndex, "revealed");
+        this.setPhase(this.currentQuestionId, "revealed");
         this.broadcastState();
         return;
       }
       case "reset-session": {
-        this.currentQuestionIndex = 0;
-        this.phaseByQuestionIndex.clear();
-        this.votesByQuestionIndex.clear();
-        await this.clearPersistedState();
-        await this.refreshOptionImages();
-        this.broadcastState();
+        await this.resetSession();
         return;
       }
     }
   }
 
+  private async resetSession() {
+    this.currentQuestionId = this.questions[0]?.id ?? null;
+    this.phaseByQuestionId.clear();
+    this.votesByQuestionId.clear();
+    this.sql`DELETE FROM room_vote`;
+    this.sql`DELETE FROM room_phase`;
+    this.persistCurrentQuestionId();
+    await this.refreshOptionImages();
+    this.broadcastState();
+  }
+
   /** Best effort: a failed R2 read shows options without images rather than breaking the room. */
   private async refreshOptionImages() {
     try {
-      this.optionImages = await loadOptionImages(this.env.POLL_IMAGES, this.getCurrentQuestion());
+      this.optionImages = await loadOptionImages(
+        this.env.POLL_IMAGES,
+        this.name,
+        this.getCurrentQuestion()
+      );
     } catch (error) {
       console.error("Failed to load poll option images", error);
       this.optionImages = {};
@@ -334,12 +406,12 @@ export class PollRoom extends Server<Env> {
     const voterId = connection.state?.voterId ?? null;
     const question = this.getCurrentQuestion();
     const phase = this.getCurrentPhase();
-    const votesForQuestion = this.getVotesForQuestion(this.currentQuestionIndex);
+    const votesForQuestion = question ? this.getVotesForQuestion(question.id) : new Map<string, string[]>();
     const questionPublic = question ? toPublicQuestion(question) : null;
     const resultsVisible = this.shouldShowResults(role, question);
     const voteCounts = resultsVisible
-      ? this.getVoteCounts(question, votesForQuestion)
-      : this.getEmptyVoteCounts(question);
+      ? getVoteCounts(question, votesForQuestion)
+      : getEmptyVoteCounts(question);
     const yourSelection = role === "audience" && voterId ? (votesForQuestion.get(voterId) ?? []) : [];
     const yourVoteOptionIds =
       question?.kind === "choice" ? yourSelection : [];
@@ -380,8 +452,8 @@ export class PollRoom extends Server<Env> {
       role,
       room: this.name,
       phase,
-      currentQuestionIndex: this.currentQuestionIndex,
-      totalQuestions: QUESTIONS.length,
+      currentQuestionIndex: this.getCurrentQuestionIndex(),
+      totalQuestions: this.questions.length,
       question: questionPublic,
       optionImages: this.optionImages,
       voteCounts,
@@ -392,7 +464,7 @@ export class PollRoom extends Server<Env> {
       yourNumberGuess,
       score,
       reveal,
-      host: role === "host" ? { questions: QUESTIONS } : null,
+      host: role === "host" ? { questions: this.questions } : null,
     };
   }
 
@@ -415,67 +487,31 @@ export class PollRoom extends Server<Env> {
     return identities.size;
   }
 
+  private getQuestion(questionId: string): PollQuestion | null {
+    return this.questions.find((question) => question.id === questionId) ?? null;
+  }
+
   private getCurrentQuestion(): PollQuestion | null {
-    return QUESTIONS[this.currentQuestionIndex] ?? null;
+    return this.currentQuestionId ? this.getQuestion(this.currentQuestionId) : null;
   }
 
-  private getVoteCounts(
-    question: PollQuestion | null,
-    votesForQuestion: Map<string, string[]>
-  ): VoteCounts {
-    if (!question || question.kind !== "choice") return {};
-
-    const counts: VoteCounts = {};
-    for (const option of question.options) {
-      counts[option.id] = 0;
-    }
-
-    const allVotes = Array.from(votesForQuestion.values());
-    for (let voteIndex = 0; voteIndex < allVotes.length; voteIndex += 1) {
-      const selectedOptionIds = allVotes[voteIndex];
-      for (let optionIndex = 0; optionIndex < selectedOptionIds.length; optionIndex += 1) {
-        const optionId = selectedOptionIds[optionIndex];
-        if (optionId in counts) {
-          counts[optionId] += 1;
-        }
-      }
-    }
-
-    return counts;
-  }
-
-  private getEmptyVoteCounts(question: PollQuestion | null): VoteCounts {
-    if (!question) return {};
-    if (question.kind !== "choice") return {};
-    const counts: VoteCounts = {};
-    for (const option of question.options) {
-      counts[option.id] = 0;
-    }
-    return counts;
+  /** The host UI and counters still speak in list positions; 0 when nothing is selected. */
+  private getCurrentQuestionIndex(): number {
+    const index = this.questions.findIndex((question) => question.id === this.currentQuestionId);
+    return index === -1 ? 0 : index;
   }
 
   private getNumberWinnerResult(question: Extract<PollQuestion, { kind: "number" }>): {
     winningGuess: number | null;
     winnerCount: number;
   } {
-    return this.getNumberWinnerResultForQuestionIndex(this.currentQuestionIndex, question);
-  }
-
-  private getNumberWinnerResultForQuestionIndex(
-    questionIndex: number,
-    question: Extract<PollQuestion, { kind: "number" }>
-  ): {
-    winningGuess: number | null;
-    winnerCount: number;
-  } {
-    const votesForQuestion = this.getVotesForQuestion(questionIndex);
+    const votesForQuestion = this.getVotesForQuestion(question.id);
     let winningGuess: number | null = null;
     let winnerCount = 0;
 
     const allSelections = Array.from(votesForQuestion.values());
     for (let index = 0; index < allSelections.length; index += 1) {
-      const selection = allSelections[index];
-      const guess = parseStoredNumberGuess(question, selection);
+      const guess = parseStoredNumberGuess(question, allSelections[index]);
       if (guess === null || guess > question.correctNumber) continue;
       if (winningGuess === null || guess > winningGuess) {
         winningGuess = guess;
@@ -496,14 +532,15 @@ export class PollRoom extends Server<Env> {
   }
 
   private getCurrentPhase(): PollPhase {
-    return this.phaseByQuestionIndex.get(this.currentQuestionIndex) ?? "idle";
+    if (!this.currentQuestionId) return "idle";
+    return this.phaseByQuestionId.get(this.currentQuestionId) ?? "idle";
   }
 
-  private getVotesForQuestion(questionIndex: number): Map<string, string[]> {
-    const existing = this.votesByQuestionIndex.get(questionIndex);
+  private getVotesForQuestion(questionId: string): Map<string, string[]> {
+    const existing = this.votesByQuestionId.get(questionId);
     if (existing) return existing;
     const created = new Map<string, string[]>();
-    this.votesByQuestionIndex.set(questionIndex, created);
+    this.votesByQuestionId.set(questionId, created);
     return created;
   }
 
@@ -515,12 +552,10 @@ export class PollRoom extends Server<Env> {
     let answered = 0;
     let correct = 0;
 
-    for (let questionIndex = 0; questionIndex < QUESTIONS.length; questionIndex += 1) {
-      const question = QUESTIONS[questionIndex];
-      const votesForQuestion = this.votesByQuestionIndex.get(questionIndex);
-      const selection = votesForQuestion?.get(voterId);
+    for (const question of this.questions) {
+      const selection = this.votesByQuestionId.get(question.id)?.get(voterId);
       if (!selection || selection.length === 0) continue;
-      const phase = this.phaseByQuestionIndex.get(questionIndex) ?? "idle";
+      const phase = this.phaseByQuestionId.get(question.id) ?? "idle";
 
       if (question.kind === "choice") {
         answered += 1;
@@ -534,18 +569,14 @@ export class PollRoom extends Server<Env> {
       if (guess === null) continue;
       answered += 1;
       if (phase === "revealed") {
-        const winnerResult = this.getNumberWinnerResultForQuestionIndex(questionIndex, question);
+        const winnerResult = this.getNumberWinnerResult(question);
         if (winnerResult.winningGuess !== null && guess === winnerResult.winningGuess) {
           correct += 1;
         }
       }
     }
 
-    return {
-      answered,
-      correct,
-      totalQuestions: QUESTIONS.length,
-    };
+    return { answered, correct, totalQuestions: this.questions.length };
   }
 
   private async ensureStateLoaded() {
@@ -565,77 +596,56 @@ export class PollRoom extends Server<Env> {
 
   private async loadStateFromStorage() {
     this.ensureSchema();
-    this.phaseByQuestionIndex.clear();
-    this.votesByQuestionIndex.clear();
-    this.currentQuestionIndex = 0;
+    this.initializeQuestionsOnce();
+    this.phaseByQuestionId.clear();
+    this.votesByQuestionId.clear();
 
-    const metaRows = this.sql<{ value: string }>`
-      SELECT value
-      FROM poll_room_meta
-      WHERE key = 'currentQuestionIndex'
-      LIMIT 1
+    const questionRows = this.sql<{ id: string; data: string }>`
+      SELECT id, data FROM room_question ORDER BY position
     `;
-    const currentIndexRaw = metaRows[0]?.value;
-    const parsedCurrentIndex = Number.parseInt(currentIndexRaw ?? "", 10);
-    if (
-      Number.isInteger(parsedCurrentIndex) &&
-      parsedCurrentIndex >= 0 &&
-      parsedCurrentIndex < QUESTIONS.length
-    ) {
-      this.currentQuestionIndex = parsedCurrentIndex;
-    }
-
-    const phaseRows = this.sql<{ question_index: number; phase: string }>`
-      SELECT question_index, phase
-      FROM poll_room_phase
-    `;
-    for (let index = 0; index < phaseRows.length; index += 1) {
-      const row = phaseRows[index];
-      if (!isValidQuestionIndex(row.question_index) || !isPollPhase(row.phase)) continue;
-      this.phaseByQuestionIndex.set(row.question_index, row.phase);
-    }
-
-    const voteRows = this.sql<{
-      question_index: number;
-      voter_id: string;
-      option_ids: string;
-    }>`
-      SELECT question_index, voter_id, option_ids
-      FROM poll_room_vote
-    `;
-    for (let index = 0; index < voteRows.length; index += 1) {
-      const row = voteRows[index];
-      if (!isValidQuestionIndex(row.question_index) || row.voter_id.length === 0) continue;
-
-      let parsedOptionIds: unknown;
+    this.questions = [];
+    questionRows.forEach((row, index) => {
       try {
-        parsedOptionIds = JSON.parse(row.option_ids);
+        this.questions.push(parseQuestion(JSON.parse(row.data), index));
+      } catch (error) {
+        console.error(`Skipping invalid stored question "${row.id}"`, error);
+      }
+    });
+
+    const currentRows = this.sql<{ value: string }>`
+      SELECT value FROM room_meta WHERE key = 'currentQuestionId' LIMIT 1
+    `;
+    const storedCurrentId = currentRows[0]?.value;
+    this.currentQuestionId =
+      storedCurrentId && this.getQuestion(storedCurrentId)
+        ? storedCurrentId
+        : (this.questions[0]?.id ?? null);
+
+    const phaseRows = this.sql<{ question_id: string; phase: string }>`
+      SELECT question_id, phase FROM room_phase
+    `;
+    for (const row of phaseRows) {
+      if (!this.getQuestion(row.question_id) || !isPollPhase(row.phase)) continue;
+      this.phaseByQuestionId.set(row.question_id, row.phase);
+    }
+
+    const voteRows = this.sql<{ question_id: string; voter_id: string; option_ids: string }>`
+      SELECT question_id, voter_id, option_ids FROM room_vote
+    `;
+    for (const row of voteRows) {
+      const question = this.getQuestion(row.question_id);
+      if (!question || row.voter_id.length === 0) continue;
+
+      let parsedSelection: unknown;
+      try {
+        parsedSelection = JSON.parse(row.option_ids);
       } catch {
         continue;
       }
-      if (!Array.isArray(parsedOptionIds)) continue;
+      if (!Array.isArray(parsedSelection)) continue;
 
-      const question = QUESTIONS[row.question_index];
-      if (question.kind === "choice") {
-        const allowedOptionIds = new Set(question.options.map((option) => option.id));
-        const validOptionIds: string[] = [];
-        for (let optionIndex = 0; optionIndex < parsedOptionIds.length; optionIndex += 1) {
-          const optionId = parsedOptionIds[optionIndex];
-          if (typeof optionId !== "string" || !allowedOptionIds.has(optionId)) continue;
-          if (!validOptionIds.includes(optionId)) validOptionIds.push(optionId);
-        }
-        if (!question.allowMultiple && validOptionIds.length > 1) continue;
-        if (validOptionIds.length === 0) continue;
-
-        const voteMap = this.getVotesForQuestion(row.question_index);
-        voteMap.set(row.voter_id, validOptionIds);
-        continue;
-      }
-
-      const restoredGuess = parseStoredNumberGuess(question, parsedOptionIds);
-      if (restoredGuess === null) continue;
-      const voteMap = this.getVotesForQuestion(row.question_index);
-      voteMap.set(row.voter_id, [String(restoredGuess)]);
+      const selection = sanitizeStoredSelection(question, parsedSelection);
+      if (selection) this.getVotesForQuestion(question.id).set(row.voter_id, selection);
     }
 
     await this.refreshOptionImages();
@@ -644,108 +654,135 @@ export class PollRoom extends Server<Env> {
 
   private ensureSchema() {
     this.sql`
-      CREATE TABLE IF NOT EXISTS poll_room_meta (
+      CREATE TABLE IF NOT EXISTS room_meta (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       )
     `;
     this.sql`
-      CREATE TABLE IF NOT EXISTS poll_room_phase (
-        question_index INTEGER PRIMARY KEY,
+      CREATE TABLE IF NOT EXISTS room_question (
+        position INTEGER NOT NULL,
+        id TEXT PRIMARY KEY,
+        data TEXT NOT NULL
+      )
+    `;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS room_phase (
+        question_id TEXT PRIMARY KEY,
         phase TEXT NOT NULL
       )
     `;
     this.sql`
-      CREATE TABLE IF NOT EXISTS poll_room_vote (
-        question_index INTEGER NOT NULL,
+      CREATE TABLE IF NOT EXISTS room_vote (
+        question_id TEXT NOT NULL,
         voter_id TEXT NOT NULL,
         option_ids TEXT NOT NULL,
-        PRIMARY KEY (question_index, voter_id)
+        PRIMARY KEY (question_id, voter_id)
       )
     `;
   }
 
-  private async persistCurrentQuestionIndex() {
+  /**
+   * First load only: seed the starter questions and carry over any session from the
+   * old index-keyed tables (poll_room_*), which used the starter list's order.
+   */
+  private initializeQuestionsOnce() {
+    const initialized = this.sql<{ value: string }>`
+      SELECT value FROM room_meta WHERE key = 'questionsInitialized' LIMIT 1
+    `;
+    if (initialized.length > 0) return;
+
+    STARTER_QUESTIONS.forEach((question, position) => {
+      this.sql`
+        INSERT OR REPLACE INTO room_question (position, id, data)
+        VALUES (${position}, ${question.id}, ${JSON.stringify(question)})
+      `;
+    });
+
+    const legacyTables = new Set(
+      this.sql<{ name: string }>`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name IN ('poll_room_meta', 'poll_room_phase', 'poll_room_vote')
+      `.map((row) => row.name)
+    );
+    const idAtIndex = (index: number) => STARTER_QUESTIONS[index]?.id ?? null;
+
+    if (legacyTables.has("poll_room_meta")) {
+      const rows = this.sql<{ value: string }>`
+        SELECT value FROM poll_room_meta WHERE key = 'currentQuestionIndex' LIMIT 1
+      `;
+      const questionId = idAtIndex(Number.parseInt(rows[0]?.value ?? "", 10));
+      if (questionId) {
+        this.sql`
+          INSERT OR REPLACE INTO room_meta (key, value) VALUES ('currentQuestionId', ${questionId})
+        `;
+      }
+      this.sql`DROP TABLE poll_room_meta`;
+    }
+    if (legacyTables.has("poll_room_phase")) {
+      for (const row of this.sql<{ question_index: number; phase: string }>`
+        SELECT question_index, phase FROM poll_room_phase
+      `) {
+        const questionId = idAtIndex(row.question_index);
+        if (!questionId) continue;
+        this.sql`
+          INSERT OR REPLACE INTO room_phase (question_id, phase) VALUES (${questionId}, ${row.phase})
+        `;
+      }
+      this.sql`DROP TABLE poll_room_phase`;
+    }
+    if (legacyTables.has("poll_room_vote")) {
+      for (const row of this.sql<{ question_index: number; voter_id: string; option_ids: string }>`
+        SELECT question_index, voter_id, option_ids FROM poll_room_vote
+      `) {
+        const questionId = idAtIndex(row.question_index);
+        if (!questionId) continue;
+        this.sql`
+          INSERT OR REPLACE INTO room_vote (question_id, voter_id, option_ids)
+          VALUES (${questionId}, ${row.voter_id}, ${row.option_ids})
+        `;
+      }
+      this.sql`DROP TABLE poll_room_vote`;
+    }
+
+    this.sql`INSERT INTO room_meta (key, value) VALUES ('questionsInitialized', '1')`;
+  }
+
+  private persistCurrentQuestionId() {
+    if (!this.currentQuestionId) {
+      this.sql`DELETE FROM room_meta WHERE key = 'currentQuestionId'`;
+      return;
+    }
     this.sql`
-      INSERT INTO poll_room_meta (key, value)
-      VALUES ('currentQuestionIndex', ${String(this.currentQuestionIndex)})
+      INSERT INTO room_meta (key, value)
+      VALUES ('currentQuestionId', ${this.currentQuestionId})
       ON CONFLICT(key) DO UPDATE SET value = excluded.value
     `;
   }
 
-  private async persistPhase(questionIndex: number, phase: PollPhase) {
+  private setPhase(questionId: string, phase: PollPhase) {
+    this.phaseByQuestionId.set(questionId, phase);
     this.sql`
-      INSERT INTO poll_room_phase (question_index, phase)
-      VALUES (${questionIndex}, ${phase})
-      ON CONFLICT(question_index) DO UPDATE SET phase = excluded.phase
+      INSERT INTO room_phase (question_id, phase)
+      VALUES (${questionId}, ${phase})
+      ON CONFLICT(question_id) DO UPDATE SET phase = excluded.phase
     `;
   }
 
-  private async persistVote(questionIndex: number, voterId: string, optionIds: string[]) {
+  private persistVote(questionId: string, voterId: string, optionIds: string[]) {
     if (optionIds.length === 0) {
       this.sql`
-        DELETE FROM poll_room_vote
-        WHERE question_index = ${questionIndex} AND voter_id = ${voterId}
+        DELETE FROM room_vote
+        WHERE question_id = ${questionId} AND voter_id = ${voterId}
       `;
       return;
     }
     this.sql`
-      INSERT INTO poll_room_vote (question_index, voter_id, option_ids)
-      VALUES (${questionIndex}, ${voterId}, ${JSON.stringify(optionIds)})
-      ON CONFLICT(question_index, voter_id)
+      INSERT INTO room_vote (question_id, voter_id, option_ids)
+      VALUES (${questionId}, ${voterId}, ${JSON.stringify(optionIds)})
+      ON CONFLICT(question_id, voter_id)
       DO UPDATE SET option_ids = excluded.option_ids
     `;
-  }
-
-  private async clearPersistedState() {
-    this.sql`DELETE FROM poll_room_vote`;
-    this.sql`DELETE FROM poll_room_phase`;
-    this.sql`DELETE FROM poll_room_meta`;
-  }
-
-  private validateChoiceSelection(
-    question: Extract<PollQuestion, { kind: "choice" }>,
-    optionIds: string[]
-  ): { ok: true; optionIds: string[] } | { ok: false; message: string } {
-    if (!Array.isArray(optionIds) || optionIds.some((id) => typeof id !== "string")) {
-      return { ok: false, message: "Vote payload must contain string option IDs." };
-    }
-
-    const allowedIds = new Set(question.options.map((option) => option.id));
-    const seen = new Set<string>();
-    const deduped: string[] = [];
-
-    for (const optionId of optionIds) {
-      if (!allowedIds.has(optionId)) {
-        return { ok: false, message: "Vote payload contains an invalid option ID." };
-      }
-      if (seen.has(optionId)) continue;
-      seen.add(optionId);
-      deduped.push(optionId);
-    }
-
-    if (!question.allowMultiple && deduped.length > 1) {
-      return { ok: false, message: "This question allows only one selected option." };
-    }
-
-    return { ok: true, optionIds: deduped };
-  }
-
-  private validateNumberGuess(
-    question: Extract<PollQuestion, { kind: "number" }>,
-    value: number | null
-  ): { ok: true; value: number | null } | { ok: false; message: string } {
-    if (value === null) return { ok: true, value: null };
-    if (typeof value !== "number" || !Number.isFinite(value)) {
-      return { ok: false, message: "Number guess must be a valid number." };
-    }
-    if (question.min !== undefined && value < question.min) {
-      return { ok: false, message: `Guess must be at least ${question.min}.` };
-    }
-    if (question.max !== undefined && value > question.max) {
-      return { ok: false, message: `Guess must be at most ${question.max}.` };
-    }
-    return { ok: true, value };
   }
 }
 
@@ -772,6 +809,90 @@ function toPublicQuestion(question: PollQuestion): PollQuestionPublic {
   };
 }
 
+function getVoteCounts(
+  question: PollQuestion | null,
+  votesForQuestion: Map<string, string[]>
+): VoteCounts {
+  if (!question || question.kind !== "choice") return {};
+
+  const counts = getEmptyVoteCounts(question);
+  for (const selectedOptionIds of votesForQuestion.values()) {
+    for (const optionId of selectedOptionIds) {
+      if (optionId in counts) counts[optionId] += 1;
+    }
+  }
+  return counts;
+}
+
+function getEmptyVoteCounts(question: PollQuestion | null): VoteCounts {
+  if (!question || question.kind !== "choice") return {};
+  const counts: VoteCounts = {};
+  for (const option of question.options) {
+    counts[option.id] = 0;
+  }
+  return counts;
+}
+
+/** Re-checks a stored vote against the question as it is now; null when nothing valid is left. */
+function sanitizeStoredSelection(question: PollQuestion, selection: unknown[]): string[] | null {
+  if (question.kind === "number") {
+    const guess = parseStoredNumberGuess(question, selection);
+    return guess === null ? null : [String(guess)];
+  }
+
+  const allowedOptionIds = new Set(question.options.map((option) => option.id));
+  const validOptionIds: string[] = [];
+  for (const optionId of selection) {
+    if (typeof optionId !== "string" || !allowedOptionIds.has(optionId)) continue;
+    if (!validOptionIds.includes(optionId)) validOptionIds.push(optionId);
+  }
+  if (validOptionIds.length === 0) return null;
+  if (!question.allowMultiple && validOptionIds.length > 1) return null;
+  return validOptionIds;
+}
+
+function validateChoiceSelection(
+  question: Extract<PollQuestion, { kind: "choice" }>,
+  optionIds: string[]
+): { ok: true; optionIds: string[] } | { ok: false; message: string } {
+  if (!Array.isArray(optionIds) || optionIds.some((id) => typeof id !== "string")) {
+    return { ok: false, message: "Vote payload must contain string option IDs." };
+  }
+
+  const allowedIds = new Set(question.options.map((option) => option.id));
+  const deduped: string[] = [];
+
+  for (const optionId of optionIds) {
+    if (!allowedIds.has(optionId)) {
+      return { ok: false, message: "Vote payload contains an invalid option ID." };
+    }
+    if (!deduped.includes(optionId)) deduped.push(optionId);
+  }
+
+  if (!question.allowMultiple && deduped.length > 1) {
+    return { ok: false, message: "This question allows only one selected option." };
+  }
+
+  return { ok: true, optionIds: deduped };
+}
+
+function validateNumberGuess(
+  question: Extract<PollQuestion, { kind: "number" }>,
+  value: number | null
+): { ok: true; value: number | null } | { ok: false; message: string } {
+  if (value === null) return { ok: true, value: null };
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return { ok: false, message: "Number guess must be a valid number." };
+  }
+  if (question.min !== undefined && value < question.min) {
+    return { ok: false, message: `Guess must be at least ${question.min}.` };
+  }
+  if (question.max !== undefined && value > question.max) {
+    return { ok: false, message: `Guess must be at most ${question.max}.` };
+  }
+  return { ok: true, value };
+}
+
 function isSelectionCorrect(selection: string[], correctOptionIds: string[]): boolean {
   if (selection.length !== correctOptionIds.length) return false;
   const selectedSet = new Set(selection);
@@ -795,10 +916,6 @@ function parseStoredNumberGuess(
 
 function isPollPhase(value: string): value is PollPhase {
   return value === "idle" || value === "open" || value === "closed" || value === "revealed";
-}
-
-function isValidQuestionIndex(questionIndex: number): boolean {
-  return Number.isInteger(questionIndex) && questionIndex >= 0 && questionIndex < QUESTIONS.length;
 }
 
 function getRole(role: string | null): PollRole {
@@ -859,165 +976,4 @@ function parseIncomingMessage(rawMessage: string): IncomingMessage | null {
     default:
       return null;
   }
-}
-
-function validateQuestions(rawQuestions: unknown): PollQuestion[] {
-  if (!Array.isArray(rawQuestions) || rawQuestions.length === 0) {
-    throw new Error("questions data module must export a non-empty array.");
-  }
-
-  const ids = new Set<string>();
-  const validatedQuestions: PollQuestion[] = [];
-
-  for (let index = 0; index < rawQuestions.length; index += 1) {
-    const rawQuestion = rawQuestions[index];
-    if (!rawQuestion || typeof rawQuestion !== "object") {
-      throw new Error(`Question at index ${index} must be an object.`);
-    }
-
-    const question = rawQuestion as Record<string, unknown>;
-    const id = question.id;
-    const prompt = question.prompt;
-    const kind = question.kind === "number" ? "number" : "choice";
-    const hideResultsUntilReveal = question.hideResultsUntilReveal;
-
-    if (typeof id !== "string" || id.length === 0) {
-      throw new Error(`Question at index ${index} has an invalid "id".`);
-    }
-    if (ids.has(id)) {
-      throw new Error(`Duplicate question id "${id}" found in questions data module.`);
-    }
-    ids.add(id);
-
-    if (typeof prompt !== "string" || prompt.length === 0) {
-      throw new Error(`Question "${id}" has an invalid "prompt".`);
-    }
-    if (
-      hideResultsUntilReveal !== undefined &&
-      typeof hideResultsUntilReveal !== "boolean"
-    ) {
-      throw new Error(
-        `Question "${id}" has invalid "hideResultsUntilReveal" (must be boolean).`
-      );
-    }
-
-    if (kind === "number") {
-      const correctNumber = question.correctNumber;
-      const min = question.min;
-      const max = question.max;
-      const step = question.step;
-
-      if (typeof correctNumber !== "number" || !Number.isFinite(correctNumber)) {
-        throw new Error(`Question "${id}" must include numeric "correctNumber".`);
-      }
-      if (min !== undefined && (typeof min !== "number" || !Number.isFinite(min))) {
-        throw new Error(`Question "${id}" has invalid "min".`);
-      }
-      if (max !== undefined && (typeof max !== "number" || !Number.isFinite(max))) {
-        throw new Error(`Question "${id}" has invalid "max".`);
-      }
-      if (step !== undefined && (typeof step !== "number" || !Number.isFinite(step) || step <= 0)) {
-        throw new Error(`Question "${id}" has invalid "step" (must be > 0).`);
-      }
-      if (min !== undefined && max !== undefined && min > max) {
-        throw new Error(`Question "${id}" has min greater than max.`);
-      }
-
-      validatedQuestions.push({
-        kind: "number",
-        id,
-        prompt,
-        correctNumber,
-        min: typeof min === "number" ? min : undefined,
-        max: typeof max === "number" ? max : undefined,
-        step: typeof step === "number" ? step : undefined,
-        hideResultsUntilReveal: hideResultsUntilReveal === true,
-      });
-      continue;
-    }
-
-    const allowMultiple = question.allowMultiple;
-    const options = question.options;
-    const correctOptionIds = question.correctOptionIds;
-    const display = parseChoiceDisplay(question.display, id);
-    if (display === "image" && !isPollImageId(id)) {
-      throw new Error(
-        `Image question "${id}" needs an id of letters, numbers, "-" or "_" (max 64).`
-      );
-    }
-    if (typeof allowMultiple !== "boolean") {
-      throw new Error(`Question "${id}" must include boolean "allowMultiple".`);
-    }
-    if (!Array.isArray(options) || options.length < 2) {
-      throw new Error(`Question "${id}" must include at least two options.`);
-    }
-    if (!Array.isArray(correctOptionIds) || correctOptionIds.length === 0) {
-      throw new Error(`Question "${id}" must include one or more correctOptionIds.`);
-    }
-
-    const optionIds = new Set<string>();
-    const validatedOptions = options.map((rawOption, optionIndex) => {
-      if (!rawOption || typeof rawOption !== "object") {
-        throw new Error(`Question "${id}" option at index ${optionIndex} must be an object.`);
-      }
-      const option = rawOption as Record<string, unknown>;
-      if (typeof option.id !== "string" || option.id.length === 0) {
-        throw new Error(`Question "${id}" has an option with invalid "id".`);
-      }
-      if (typeof option.label !== "string" || option.label.length === 0) {
-        throw new Error(`Question "${id}" option "${option.id}" has invalid "label".`);
-      }
-      if (optionIds.has(option.id)) {
-        throw new Error(`Question "${id}" has duplicate option id "${option.id}".`);
-      }
-      if (display === "image" && !isPollImageId(option.id)) {
-        throw new Error(
-          `Image question "${id}" option "${option.id}" needs an id of letters, numbers, "-" or "_".`
-        );
-      }
-      optionIds.add(option.id);
-      return { id: option.id, label: option.label };
-    });
-
-    const validatedCorrectOptionIds: string[] = [];
-    const seenCorrect = new Set<string>();
-    for (const rawCorrectOptionId of correctOptionIds) {
-      if (typeof rawCorrectOptionId !== "string") {
-        throw new Error(`Question "${id}" has non-string correctOptionIds entries.`);
-      }
-      if (!optionIds.has(rawCorrectOptionId)) {
-        throw new Error(
-          `Question "${id}" references unknown correct option "${rawCorrectOptionId}".`
-        );
-      }
-      if (seenCorrect.has(rawCorrectOptionId)) continue;
-      seenCorrect.add(rawCorrectOptionId);
-      validatedCorrectOptionIds.push(rawCorrectOptionId);
-    }
-
-    if (!allowMultiple && validatedCorrectOptionIds.length > 1) {
-      throw new Error(
-        `Question "${id}" has multiple correct options but allowMultiple is false.`
-      );
-    }
-
-    validatedQuestions.push({
-      kind: "choice",
-      id,
-      prompt,
-      allowMultiple,
-      hideResultsUntilReveal: hideResultsUntilReveal === true,
-      display,
-      options: validatedOptions,
-      correctOptionIds: validatedCorrectOptionIds,
-    });
-  }
-
-  return validatedQuestions;
-}
-
-function parseChoiceDisplay(value: unknown, questionId: string): PollChoiceDisplay {
-  if (value === undefined || value === "text") return "text";
-  if (value === "image") return "image";
-  throw new Error(`Question "${questionId}" has invalid "display" (use "text" or "image").`);
 }

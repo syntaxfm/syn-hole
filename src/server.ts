@@ -1,18 +1,12 @@
 import handler from "@tanstack/react-start/server-entry";
 import { routePartykitRequest } from "partyserver";
-import { QUESTIONS } from "./poll-room";
-import {
-  deletePollImage,
-  listAdminPollImages,
-  servePollImage,
-  uploadPollImage,
-} from "./poll-images";
+import { STARTER_QUESTIONS } from "./poll-room";
+import { copyRoomImages, deletePollImage, servePollImage, uploadPollImage } from "./poll-images";
+import type { PollQuestion, ReplaceQuestionsSource, RoomQuestionsResponse } from "./types";
+import { isSafeKeySegment } from "./utils/poll-images";
 
 export { PollRoom } from "./poll-room";
 export { AdminRegistry } from "./admin-registry";
-
-/** Audience links without a room code land here (see src/routes/index.tsx). */
-const DEFAULT_ROOM_NAME = "main-stage";
 
 function getRole(role: string | null): "host" | "projector" | "audience" {
   if (role === "host" || role === "projector") return role;
@@ -35,6 +29,15 @@ function checkAdminAuth(request: Request, env: Env): Response | null {
     return new Response("Unauthorized", { status: 401 });
   }
   return null;
+}
+
+/** Calls a room's Durable Object directly. partyserver needs the room name in this header. */
+function fetchRoom(env: Env, roomName: string, path: string, init?: RequestInit): Promise<Response> {
+  const headers = new Headers(init?.headers);
+  headers.set("x-partykit-room", roomName);
+  return env.PollRoom.get(env.PollRoom.idFromName(roomName)).fetch(
+    new Request(`http://internal${path}`, { ...init, headers })
+  );
 }
 
 function getRegistryStub(env: Env): DurableObjectStub {
@@ -94,14 +97,23 @@ export default {
       );
     }
 
-    const pollImageMatch = url.pathname.match(/^\/api\/images\/([^/]+)\/([^/]+)$/);
+    const pollImageMatch = url.pathname.match(/^\/api\/images\/([^/]+)\/([^/]+)\/([^/]+)$/);
     if (pollImageMatch && request.method === "GET") {
       return servePollImage(
         env.POLL_IMAGES,
-        QUESTIONS,
         decodeURIComponent(pollImageMatch[1]),
-        decodeURIComponent(pollImageMatch[2])
+        decodeURIComponent(pollImageMatch[2]),
+        decodeURIComponent(pollImageMatch[3])
       );
+    }
+
+    // Rooms are only reachable over WebSocket from outside. Their HTTP endpoints
+    // (questions, reset, stats) are internal and go through the admin API below.
+    if (
+      url.pathname.startsWith("/parties/") &&
+      request.headers.get("upgrade")?.toLowerCase() !== "websocket"
+    ) {
+      return new Response("Not Found", { status: 404 });
     }
 
     if (url.pathname.startsWith("/api/admin")) {
@@ -147,105 +159,110 @@ async function handleAdminApi(request: Request, env: Env, url: URL): Promise<Res
   const path = url.pathname.replace(/^\/api\/admin/, "");
 
   if (path === "/rooms" && request.method === "GET") {
-    const stub = getRegistryStub(env);
-    const resp = await stub.fetch(new Request("http://internal/rooms"));
-    return resp;
+    return getRegistryStub(env).fetch(new Request("http://internal/rooms"));
   }
 
   if (path === "/rooms" && request.method === "POST") {
-    const stub = getRegistryStub(env);
-    const resp = await stub.fetch(
+    return getRegistryStub(env).fetch(
       new Request("http://internal/rooms", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: await request.text(),
       })
     );
-    return resp;
   }
 
-  const roomStatsMatch = path.match(/^\/rooms\/([^/]+)\/stats$/);
-  if (roomStatsMatch && request.method === "GET") {
-    const roomName = decodeURIComponent(roomStatsMatch[1]);
-    const roomId = env.PollRoom.idFromName(roomName);
-    const roomStub = env.PollRoom.get(roomId);
-    const resp = await roomStub.fetch(
-      new Request("http://internal/stats", { headers: { "x-partykit-room": roomName } })
+  const roomMatch = path.match(/^\/rooms\/([^/]+)(\/.*)?$/);
+  if (!roomMatch) return new Response("Not Found", { status: 404 });
+
+  const roomName = decodeURIComponent(roomMatch[1]);
+  const roomPath = roomMatch[2] ?? "";
+
+  if (roomPath === "" && request.method === "DELETE") {
+    return getRegistryStub(env).fetch(
+      new Request(`http://internal/rooms/${encodeURIComponent(roomName)}`, { method: "DELETE" })
     );
-    return resp;
   }
 
-  const roomResetMatch = path.match(/^\/rooms\/([^/]+)\/reset$/);
-  if (roomResetMatch && request.method === "POST") {
-    const roomName = decodeURIComponent(roomResetMatch[1]);
-    const roomId = env.PollRoom.idFromName(roomName);
-    const roomStub = env.PollRoom.get(roomId);
-    const resp = await roomStub.fetch(
-      new Request("http://internal/reset", {
-        method: "POST",
-        headers: { "x-partykit-room": roomName },
-      })
-    );
-    return resp;
+  if (!isSafeKeySegment(roomName)) {
+    return Response.json({ error: "Invalid room name." }, { status: 400 });
   }
 
-  if (path === "/images" && request.method === "GET") {
-    return Response.json(await listAdminPollImages(env.POLL_IMAGES, QUESTIONS), {
-      headers: { "cache-control": "no-store" },
+  if (roomPath === "/stats" && request.method === "GET") {
+    return fetchRoom(env, roomName, "/stats");
+  }
+
+  if (roomPath === "/reset" && request.method === "POST") {
+    return fetchRoom(env, roomName, "/reset", { method: "POST" });
+  }
+
+  if (roomPath === "/questions" && request.method === "GET") {
+    return fetchRoom(env, roomName, "/questions");
+  }
+
+  if (roomPath === "/questions" && request.method === "PUT") {
+    return fetchRoom(env, roomName, "/questions", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: await request.text(),
     });
   }
 
-  const imageMatch = path.match(/^\/images\/([^/]+)\/([^/]+)$/);
+  if (roomPath === "/questions/replace" && request.method === "POST") {
+    return replaceRoomQuestions(env, roomName, await request.json().catch(() => null));
+  }
+
+  const imageMatch = roomPath.match(/^\/images\/([^/]+)\/([^/]+)$/);
   if (imageMatch && (request.method === "PUT" || request.method === "DELETE")) {
     const questionId = decodeURIComponent(imageMatch[1]);
     const optionId = decodeURIComponent(imageMatch[2]);
     const response =
       request.method === "PUT"
-        ? await uploadPollImage(env.POLL_IMAGES, QUESTIONS, questionId, optionId, request)
-        : await deletePollImage(env.POLL_IMAGES, QUESTIONS, questionId, optionId);
+        ? await uploadPollImage(env.POLL_IMAGES, roomName, questionId, optionId, request)
+        : await deletePollImage(env.POLL_IMAGES, roomName, questionId, optionId);
     if (response.ok) {
-      // Best effort: the upload already succeeded even if a room can't be reached.
-      await notifyRoomsImagesChanged(env).catch((error: unknown) => {
-        console.error("Failed to notify rooms about image change", error);
-      });
+      // Best effort: the upload already succeeded even if the room can't be reached.
+      await fetchRoom(env, roomName, "/images-changed", { method: "POST" }).catch(
+        (error: unknown) => console.error("Failed to notify room about image change", error)
+      );
     }
     return response;
-  }
-
-  const roomDeleteMatch = path.match(/^\/rooms\/([^/]+)$/);
-  if (roomDeleteMatch && request.method === "DELETE") {
-    const roomName = decodeURIComponent(roomDeleteMatch[1]);
-    const stub = getRegistryStub(env);
-    const resp = await stub.fetch(
-      new Request(`http://internal/rooms/${encodeURIComponent(roomName)}`, {
-        method: "DELETE",
-      })
-    );
-    return resp;
   }
 
   return new Response("Not Found", { status: 404 });
 }
 
-/** Lets open screens pick up a new or removed image without the host reselecting the question. */
-async function notifyRoomsImagesChanged(env: Env): Promise<void> {
-  const registryResponse = await getRegistryStub(env).fetch(new Request("http://internal/rooms"));
-  const rows = (await registryResponse.json()) as Array<{ name: string }>;
-  const roomNames = new Set([DEFAULT_ROOM_NAME, ...rows.map((row) => row.name)]);
-
-  const results = await Promise.allSettled(
-    Array.from(roomNames, (roomName) =>
-      env.PollRoom.get(env.PollRoom.idFromName(roomName)).fetch(
-        new Request("http://internal/images-changed", {
-          method: "POST",
-          headers: { "x-partykit-room": roomName },
-        })
-      )
-    )
-  );
-  for (const result of results) {
-    if (result.status === "rejected") {
-      console.error("Failed to notify room about image change", result.reason);
-    }
+function parseReplaceSource(body: unknown): ReplaceQuestionsSource | null {
+  if (!body || typeof body !== "object" || !("kind" in body)) return null;
+  if (body.kind === "starter" || body.kind === "empty") return { kind: body.kind };
+  if (body.kind === "room" && "room" in body && typeof body.room === "string") {
+    return isSafeKeySegment(body.room) ? { kind: "room", room: body.room } : null;
   }
+  return null;
+}
+
+/** Replaces a room's questions (and, when copying a room, its images) in one admin action. */
+async function replaceRoomQuestions(env: Env, roomName: string, body: unknown): Promise<Response> {
+  const source = parseReplaceSource(body);
+  if (!source) return Response.json({ error: "Unknown source." }, { status: 400 });
+  if (source.kind === "room" && source.room === roomName) {
+    return Response.json({ error: "Pick a different room to copy from." }, { status: 400 });
+  }
+
+  let questions: PollQuestion[] = [];
+  if (source.kind === "starter") questions = STARTER_QUESTIONS;
+  if (source.kind === "room") {
+    const sourceResponse = await fetchRoom(env, source.room, "/questions");
+    if (!sourceResponse.ok) {
+      return Response.json({ error: "Could not read that room's questions." }, { status: 502 });
+    }
+    questions = ((await sourceResponse.json()) as RoomQuestionsResponse).questions;
+    await copyRoomImages(env.POLL_IMAGES, source.room, roomName);
+  }
+
+  return fetchRoom(env, roomName, "/questions", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ questions }),
+  });
 }

@@ -26,18 +26,20 @@ export type PollOptionImage = {
   height: number;
 };
 
-export type AdminPollImageOption = {
-  id: string;
-  label: string;
-  image: (PollOptionImage & { size: number }) | null;
-};
+export type StoredOptionImage = PollOptionImage & { size: number };
 
-export type AdminPollImageQuestion = {
-  index: number;
-  id: string;
-  prompt: string;
-  correctOptionIds: string[];
-  options: AdminPollImageOption[];
+/** A room's uploaded images, by question id then option id. */
+export type RoomOptionImages = Record<string, Record<string, StoredOptionImage>>;
+
+/** What to replace a room's questions with: the starter list, nothing, or a copy of another room. */
+export type ReplaceQuestionsSource =
+  | { kind: "starter" }
+  | { kind: "empty" }
+  | { kind: "room"; room: string };
+
+export type RoomQuestionsResponse = {
+  questions: PollQuestion[];
+  images: RoomOptionImages;
 };
 
 export type PollNumberQuestion = {

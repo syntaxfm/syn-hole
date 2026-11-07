@@ -13,6 +13,7 @@ import { Route as ScreenRouteImport } from './routes/screen'
 import { Route as HostRouteImport } from './routes/host'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AdminIndexRouteImport } from './routes/admin/index'
+import { Route as AdminRoomRouteImport } from './routes/admin/$room'
 import { Route as RRoomIndexRouteImport } from './routes/r/$room/index'
 import { Route as RRoomScreenRouteImport } from './routes/r/$room/screen'
 import { Route as RRoomHostRouteImport } from './routes/r/$room/host'
@@ -37,6 +38,11 @@ const AdminIndexRoute = AdminIndexRouteImport.update({
   path: '/admin/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AdminRoomRoute = AdminRoomRouteImport.update({
+  id: '/admin/$room',
+  path: '/admin/$room',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const RRoomIndexRoute = RRoomIndexRouteImport.update({
   id: '/r/$room/',
   path: '/r/$room/',
@@ -57,6 +63,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/host': typeof HostRoute
   '/screen': typeof ScreenRoute
+  '/admin/$room': typeof AdminRoomRoute
   '/admin/': typeof AdminIndexRoute
   '/r/$room/host': typeof RRoomHostRoute
   '/r/$room/screen': typeof RRoomScreenRoute
@@ -66,6 +73,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/host': typeof HostRoute
   '/screen': typeof ScreenRoute
+  '/admin/$room': typeof AdminRoomRoute
   '/admin': typeof AdminIndexRoute
   '/r/$room/host': typeof RRoomHostRoute
   '/r/$room/screen': typeof RRoomScreenRoute
@@ -76,6 +84,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/host': typeof HostRoute
   '/screen': typeof ScreenRoute
+  '/admin/$room': typeof AdminRoomRoute
   '/admin/': typeof AdminIndexRoute
   '/r/$room/host': typeof RRoomHostRoute
   '/r/$room/screen': typeof RRoomScreenRoute
@@ -87,6 +96,7 @@ export interface FileRouteTypes {
     | '/'
     | '/host'
     | '/screen'
+    | '/admin/$room'
     | '/admin/'
     | '/r/$room/host'
     | '/r/$room/screen'
@@ -96,6 +106,7 @@ export interface FileRouteTypes {
     | '/'
     | '/host'
     | '/screen'
+    | '/admin/$room'
     | '/admin'
     | '/r/$room/host'
     | '/r/$room/screen'
@@ -105,6 +116,7 @@ export interface FileRouteTypes {
     | '/'
     | '/host'
     | '/screen'
+    | '/admin/$room'
     | '/admin/'
     | '/r/$room/host'
     | '/r/$room/screen'
@@ -115,6 +127,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   HostRoute: typeof HostRoute
   ScreenRoute: typeof ScreenRoute
+  AdminRoomRoute: typeof AdminRoomRoute
   AdminIndexRoute: typeof AdminIndexRoute
   RRoomHostRoute: typeof RRoomHostRoute
   RRoomScreenRoute: typeof RRoomScreenRoute
@@ -151,6 +164,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AdminIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/admin/$room': {
+      id: '/admin/$room'
+      path: '/admin/$room'
+      fullPath: '/admin/$room'
+      preLoaderRoute: typeof AdminRoomRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/r/$room/': {
       id: '/r/$room/'
       path: '/r/$room'
@@ -179,6 +199,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   HostRoute: HostRoute,
   ScreenRoute: ScreenRoute,
+  AdminRoomRoute: AdminRoomRoute,
   AdminIndexRoute: AdminIndexRoute,
   RRoomHostRoute: RRoomHostRoute,
   RRoomScreenRoute: RRoomScreenRoute,
