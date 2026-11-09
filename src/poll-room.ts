@@ -3,7 +3,7 @@ import type { Connection, ConnectionContext } from "partyserver";
 import starterQuestionsData from "./data/questions";
 import { deleteUnusedRoomImages, listRoomImages, loadOptionImages } from "./poll-images";
 import { DEFAULT_PLAY_MODE, PLAY_MODES, isPlayMode, parseRoomSettings } from "./utils/play-mode";
-import { parseQuestion, parseQuestionList } from "./utils/questions";
+import { getOptionName, parseQuestion, parseQuestionList } from "./utils/questions";
 import type {
   IncomingMessage,
   NumberWinner,
@@ -439,7 +439,8 @@ export class PollRoom extends Server<Env> {
     const question = this.getCurrentQuestion();
     const phase = this.getCurrentPhase();
     const votesForQuestion = question ? this.getVotesForQuestion(question.id) : new Map<string, string[]>();
-    const questionPublic = question ? toPublicQuestion(question) : null;
+    const canRevealCorrect = role === "host" || phase === "revealed";
+    const questionPublic = question ? toPublicQuestion(question, canRevealCorrect) : null;
     const resultsVisible = this.shouldShowResults(role, question);
     const voteCounts = resultsVisible
       ? getVoteCounts(question, votesForQuestion)
@@ -449,7 +450,6 @@ export class PollRoom extends Server<Env> {
       question?.kind === "choice" ? yourSelection : [];
     const yourNumberGuess =
       question?.kind === "number" ? parseStoredNumberGuess(question, yourSelection) : null;
-    const canRevealCorrect = role === "host" || phase === "revealed";
     const reveal =
       canRevealCorrect && question
         ? question.kind === "choice"
@@ -869,8 +869,10 @@ export class PollRoom extends Server<Env> {
   }
 }
 
-function toPublicQuestion(question: PollQuestion): PollQuestionPublic {
+/** Image option names can give the answer away, so they stay "Option A", "Option B", … until reveal. */
+function toPublicQuestion(question: PollQuestion, canShowImageNames: boolean): PollQuestionPublic {
   if (question.kind === "choice") {
+    const shouldHideLabels = question.display === "image" && !canShowImageNames;
     return {
       kind: "choice",
       id: question.id,
@@ -878,7 +880,9 @@ function toPublicQuestion(question: PollQuestion): PollQuestionPublic {
       allowMultiple: question.allowMultiple,
       hideResultsUntilReveal: question.hideResultsUntilReveal,
       display: question.display,
-      options: question.options.map((option) => ({ ...option })),
+      options: question.options.map((option, index) =>
+        shouldHideLabels ? { id: option.id, label: getOptionName(index) } : { ...option }
+      ),
     };
   }
   return {

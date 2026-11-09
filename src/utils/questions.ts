@@ -171,7 +171,7 @@ export function getQuestionIssue(question: PollQuestion): string | null {
   }
   if (question.options.length < 2) return "Add at least 2 options.";
   if (question.options.some((option) => option.label.trim().length === 0)) {
-    return question.display === "image" ? "Give every image a description." : "Fill in every option.";
+    return question.display === "image" ? "Name every image." : "Fill in every option.";
   }
   if (question.correctOptionIds.length === 0) return "Mark the correct answer.";
   if (!question.allowMultiple && question.correctOptionIds.length > 1) {

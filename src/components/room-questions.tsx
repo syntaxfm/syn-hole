@@ -438,8 +438,8 @@ function ChoiceFields(props: {
                 </button>
                 <input
                   className="text-input"
-                  aria-label={isImage ? `${optionName} description` : optionName}
-                  placeholder={isImage ? "Image description" : optionName}
+                  aria-label={isImage ? `${optionName} name` : optionName}
+                  placeholder={isImage ? "Name" : optionName}
                   value={option.label}
                   onChange={(event) => {
                     const label = event.currentTarget.value;

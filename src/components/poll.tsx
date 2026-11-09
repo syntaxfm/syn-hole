@@ -37,6 +37,7 @@ import {
   savePlayMode,
 } from "~/utils/play-mode";
 import { isImageQuestion, isLandscapeImageSet } from "~/utils/poll-images";
+import { getOptionName } from "~/utils/questions";
 
 type ViewMode = "audience" | "host" | "projector";
 
@@ -1423,8 +1424,8 @@ function AudienceImageOptions(props: {
             <OptionImage image={images[option.id]} label={option.label} />
             <span className="audience-image-meta">
               <span className="audience-option-left">
-                <small>Option</small>
-                <strong>{String.fromCharCode(65 + (index % 26))}</strong>
+                <small>{isRevealed ? getOptionName(index) : "Option"}</small>
+                <strong>{isRevealed ? option.label : String.fromCharCode(65 + (index % 26))}</strong>
               </span>
               <span className="audience-option-right">
                 {showResults ? (
@@ -1479,7 +1480,7 @@ function ProjectorImageResults(props: {
           >
             <div className="projector-bar-topline">
               <span className={`projector-bar-label ${isWinner ? "is-correct" : ""}`}>
-                Option {String.fromCharCode(65 + (index % 26))}
+                {isRevealed ? `${getOptionName(index)} · ${option.label}` : getOptionName(index)}
               </span>
               <span>
                 {showResults ? (
@@ -1533,7 +1534,7 @@ function HostPreviewImageResults(props: {
             <OptionImage image={images[option.id]} label={option.label} />
             <div className="host-preview-result-top">
               <span>
-                Option {String.fromCharCode(65 + (index % 26))}
+                {getOptionName(index)} · {option.label}
                 {isCorrect ? " ✓" : ""}
               </span>
               <span>
