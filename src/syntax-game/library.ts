@@ -1,6 +1,6 @@
 import type { SyntaxImage, SyntaxLibraryEntry, SyntaxSavedSet, SyntaxSessionSnapshot } from "~/syntax-game/types";
 import { parseSyntaxId, parseSyntaxLibraryEntry, parseSyntaxObject, parseSyntaxSavedSet } from "~/syntax-game/validation";
-import { prepareSyntaxSession } from "~/syntax-game/session";
+import { prepareSyntaxSession, serializeSyntaxSnapshot } from "~/syntax-game/session";
 
 /** Server-only authoring wrapper. Drafts need not be valid playable entries. */
 export type SyntaxLibraryRecord = Omit<SyntaxLibraryEntry, "image"> & {
@@ -187,7 +187,7 @@ export class SyntaxLibraryStore {
       const set = parseSyntaxSavedSet({ ...saved, submissionMode: options.submissionMode ?? saved.submissionMode });
       const entries = set.rounds.map(round => this.playable(this.getEntry(round.entryId)));
       const snapshot = prepareSyntaxSession(id, set, entries, Date.now(), options.askPlayMode as boolean).snapshot;
-      this.storage.sql.exec("INSERT INTO syntax_snapshots (id, set_id, body) VALUES (?, ?, ?)", id, setId, JSON.stringify(snapshot));
+      this.storage.sql.exec("INSERT INTO syntax_snapshots (id, set_id, body) VALUES (?, ?, ?)", id, setId, serializeSyntaxSnapshot(snapshot));
       return snapshot;
     });
   }

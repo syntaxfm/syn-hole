@@ -1,5 +1,5 @@
 import { abortSyntaxSession, advanceSyntaxSession, closeExpiredSyntaxRound, joinSyntaxSession, revealSyntaxRound, startSyntaxRound } from "~/syntax-game/session";
-import { parseSyntaxLibrary, parseSyntaxSavedSet, parseSyntaxPoint } from "~/syntax-game/validation";
+import { parseSyntaxLibrary, parseSyntaxSavedSet, parseSyntaxPoint, SYNTAX_MAX_PLAYERS } from "~/syntax-game/validation";
 import { syntaxRoundId, SyntaxProtocolError } from "~/syntax-game/protocol";
 import type { SyntaxCommand, SyntaxAnswerAck } from "./protocol";
 import type { SyntaxPlayer, SyntaxSession, SyntaxSessionSnapshot, SyntaxAnswer } from "./types";
@@ -42,7 +42,7 @@ export class SyntaxRuntime {
     if (deadline !== null) await this.storage.setAlarm(deadline);
     else await this.storage.deleteAlarm();
   }
-  private commit(record: SyntaxRoomRecord, accepted?: { answer: SyntaxAnswer; player: SyntaxPlayer }) {
+  private commit(record: SyntaxRoomRecord, accepted?: { answer?: SyntaxAnswer; player: SyntaxPlayer }) {
     this.store.save(record, accepted);
     this.record = record;
     this.changed();
@@ -62,8 +62,10 @@ export class SyntaxRuntime {
       try {
         this.expire();
         if (this.mode !== "syntax" || !this.session || ["finished", "aborted"].includes(this.session.phase)) return;
+        if (this.session.players.length >= SYNTAX_MAX_PLAYERS && !this.session.players.some(existing => existing.id === player.id)) return false;
         const session = joinSyntaxSession(this.session, player);
-        if (session !== this.session) this.commit({ ...this.record, session });
+        if (session !== this.session) this.commit({ ...this.record, session }, { player: session.players.at(-1)! });
+        return true;
       } finally { await this.alarm(); }
     });
   }
@@ -130,7 +132,10 @@ export class SyntaxRuntime {
             this.expire();
             if (this.record.generation !== generation || this.mode !== mode) throw new Error("Launch superseded by a room mode change.");
             let session: SyntaxSession = { snapshot, phase: "prepared", roundIndex: 0, timing: null, players: [], answers: [], revealedRoundIndexes: [] };
-            for (const player of players) session = joinSyntaxSession(session, player);
+            for (const player of players) {
+              if (session.players.length >= SYNTAX_MAX_PLAYERS) break;
+              session = joinSyntaxSession(session, player);
+            }
             this.commit({ mode: "syntax", generation: generation + 1, session });
           } finally { await this.alarm(); }
         });

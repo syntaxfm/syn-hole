@@ -33,7 +33,9 @@ type PollConnectionState = {
   displayName: string | null;
   playMode?: PlayMode;
   syntaxProtocol?: 1;
+  syntaxVoterId?: string;
   syntaxReady?: { roundId: string; status: "ready" | "failed" };
+  syntaxReadyRate?: { at: number; count: number };
 };
 
 /** Every room starts with these the first time it loads; after that the room owns its list. */
@@ -176,7 +178,11 @@ export class PollRoom extends Server<Env> {
     const playMode = url.searchParams.get("playMode");
     conn.setState({ role, voterId, displayName, ...(isPlayMode(playMode) ? { playMode } : {}), ...(url.searchParams.get("syntaxProtocol") === "1" ? { syntaxProtocol: 1 as const } : {}) });
     if (voterId && isPlayMode(playMode) && this.syntax.mode === "poll") this.setPlayMode(voterId, playMode);
-    if (voterId) await this.syntax.join({ id: voterId, name: displayName ?? "Anonymous", playMode: isPlayMode(playMode) ? playMode : this.getPlayModeForVoter(voterId) });
+    const syntaxVoterId = this.syntaxPlayerId(conn);
+    if (syntaxVoterId && await this.syntax.join({ id: syntaxVoterId, name: displayName ?? "Anonymous", playMode: isPlayMode(playMode) ? playMode : this.getPlayModeForVoter(voterId!) }) === false) {
+      this.rejectSyntaxCapacity(conn);
+      return;
+    }
     this.broadcastState();
   }
 
@@ -185,22 +191,34 @@ export class PollRoom extends Server<Env> {
     message: string | ArrayBuffer | ArrayBufferView
   ) {
     const receivedAt = Date.now(); // Capture before hydration, alarms, or queue awaits.
+    // Reject readiness floods BEFORE they enter the syntax lifecycle queue or
+    // cause SQL/alarm work. Persist the limiter across connection hibernation.
+    let raw: unknown;
+    if (typeof message === "string") { try { raw = JSON.parse(message); } catch {} }
+    if (raw && typeof raw === "object" && "type" in raw && raw.type === "syntax:ready") {
+      const value = raw as Record<string, unknown>;
+      const state = conn.state;
+      if (state?.syntaxProtocol !== 1) return;
+      if (state.syntaxReady && state.syntaxReady.roundId === value.roundId && state.syntaxReady.status === value.status) return;
+      const previous = state.syntaxReadyRate;
+      const rate = previous && receivedAt >= previous.at && receivedAt - previous.at < 1000 ? previous : { at: receivedAt, count: 0 };
+      if (rate.count >= 2) return;
+      conn.setState({ ...state, syntaxReadyRate: { at: rate.at, count: rate.count + 1 } });
+    }
     // Enqueue synchronously on entry. Later Reveal/Next/Abort socket events must
     // not overtake answers waiting for initial I/O. Alarms may close, never reveal.
-    const result = this.messageTail.then(() => this.processMessage(conn, message, receivedAt));
+    const result = this.messageTail.then(() => this.processMessage(conn, message, receivedAt, raw));
     this.messageTail = result.catch(() => {});
     return result;
   }
 
-  private async processMessage(conn: Connection<PollConnectionState>, message: string | ArrayBuffer | ArrayBufferView, receivedAt: number) {
+  private async processMessage(conn: Connection<PollConnectionState>, message: string | ArrayBuffer | ArrayBufferView, receivedAt: number, raw: unknown) {
     if (typeof message !== "string") {
       await this.ensureStateLoaded();
       await this.syntax.reconcile();
       return;
     }
 
-    let raw: unknown;
-    try { raw = JSON.parse(message); } catch { /* Legacy parser reports errors. */ }
     if (raw && typeof raw === "object" && "type" in raw && typeof raw.type === "string" && raw.type.startsWith("syntax:")) {
       try {
         await this.ensureStateLoaded();
@@ -210,18 +228,33 @@ export class PollRoom extends Server<Env> {
         try { command = parseSyntaxCommand(raw); }
         catch (error) { throw new SyntaxProtocolError("invalid-payload", error instanceof Error ? error.message : "Invalid syntax command."); }
         if (command.type === "syntax:answer") {
-          this.sendSyntax(conn, await this.syntax.answer(command, { role: conn.state?.role ?? "audience", voterId: conn.state?.voterId ?? null }, receivedAt));
+          this.sendSyntax(conn, await this.syntax.answer(command, { role: conn.state?.role ?? "audience", voterId: this.syntaxPlayerId(conn) }, receivedAt));
         } else if (command.type === "syntax:clicks") {
           const s = this.syntax.assertRound(command.gameId, command.roundId);
           this.sendSyntax(conn, { type: "syntax:clicks", gameId: command.gameId, roundId: command.roundId, page: projectSyntaxClickPage(s, this.sharedSyntaxProjection(s), command.offset) });
         } else if (command.type === "syntax:ready") {
           this.syntax.assertRound(command.gameId, command.roundId);
+          if (conn.state?.syntaxReady?.roundId === command.roundId && conn.state.syntaxReady.status === command.status) return;
           conn.setState({ ...conn.state, syntaxReady: { roundId: command.roundId, status: command.status } });
-          this.broadcastState();
+          // Readiness is host-only telemetry, not audience/poll state. One client
+          // must not be able to fan out redundant broadcasts to the entire room.
+          for (const host of this.getConnections<PollConnectionState>()) {
+            if (host.state?.role === "host" && host.state.syntaxProtocol === 1) this.sendSyntax(host, this.buildSyntaxState(host));
+          }
         } else {
           await this.syntax.command(command, conn.state?.role ?? "audience", this.askPlayMode, this.syntaxPlayers(), receivedAt);
           // Include sockets that joined while the registry snapshot was in flight.
-          if (command.type === "syntax:launch") for (const player of this.syntaxPlayers()) await this.syntax.join(player);
+          if (command.type === "syntax:launch") {
+            const joined = new Set(this.syntax.session?.players.map(player => player.id));
+            for (const connection of this.getConnections<PollConnectionState>()) {
+              const state = connection.state;
+              const id = this.syntaxPlayerId(connection);
+              if (!state || !id || joined.has(id)) continue;
+              const accepted = await this.syntax.join({ id, name: state.displayName ?? "Anonymous", playMode: state.playMode ?? this.getPlayModeForVoter(state.voterId!) });
+              if (accepted === false) this.rejectSyntaxCapacity(connection);
+              else joined.add(id);
+            }
+          }
         }
       } catch (error) {
         this.sendSyntax(conn, {
@@ -541,15 +574,33 @@ export class PollRoom extends Server<Env> {
   private syntaxPlayers(): SyntaxPlayer[] {
     return Array.from(this.getConnections<PollConnectionState>()).flatMap((conn) => {
       const state = conn.state;
-      return state?.role === "audience" && state.voterId ? [{ id: state.voterId, name: state.displayName ?? "Anonymous", playMode: state.playMode ?? this.getPlayModeForVoter(state.voterId) }] : [];
+      const id = this.syntaxPlayerId(conn);
+      return state && id ? [{ id, name: state.displayName ?? "Anonymous", playMode: state.playMode ?? this.getPlayModeForVoter(state.voterId!) }] : [];
     });
+  }
+
+  private syntaxPlayerId(connection: Connection<PollConnectionState>): string | null {
+    const state = connection.state;
+    if (state?.role !== "audience" || !state.voterId) return null;
+    if (state.syntaxVoterId) return state.syntaxVoterId;
+    if (/^[a-zA-Z0-9_-]{1,100}$/.test(state.voterId)) return state.voterId;
+    // The new game requires valid IDs, unlike legacy polls. Normalize ONLY its
+    // identity, retaining the original poll voter ID and reconnect semantics.
+    const id = crypto.randomUUID();
+    connection.setState({ ...state, syntaxVoterId: id });
+    return id;
+  }
+
+  private rejectSyntaxCapacity(connection: Connection<PollConnectionState>) {
+    this.sendError(connection, "Game is at capacity. Try joining the next game.");
+    connection.close(1013, "Game is at capacity.");
   }
 
   private buildSyntaxState(connection: Connection<PollConnectionState>): SyntaxStateMessage {
     const s = this.syntax.session;
     const role = connection.state?.role ?? "audience";
     const shared = s ? this.sharedSyntaxProjection(s) : null;
-    const voterId = role === "audience" ? connection.state?.voterId ?? undefined : undefined;
+    const voterId = role === "audience" ? this.syntaxPlayerId(connection) ?? undefined : undefined;
     const ownAnswer = voterId ? shared?.currentAnswers.get(voterId) : undefined;
     const roundId = s ? syntaxRoundId(s.snapshot.id, s.roundIndex) : null;
     const connections = role === "host" ? Array.from(this.getConnections<PollConnectionState>()).filter((c) => c.state?.syntaxProtocol === 1) : [];

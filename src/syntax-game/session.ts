@@ -1,7 +1,7 @@
 import type {
   SyntaxLibraryEntry, SyntaxPlayer, SyntaxSession, SyntaxSessionSnapshot,
 } from "~/syntax-game/types";
-import { parseSyntaxId, parseSyntaxLibrary, parseSyntaxSavedSet, SYNTAX_MAX_PLAYER_NAME_LENGTH } from "~/syntax-game/validation";
+import { parseSyntaxId, parseSyntaxLibrary, parseSyntaxSavedSet, SYNTAX_MAX_PLAYER_NAME_LENGTH, SYNTAX_MAX_PLAYERS, SYNTAX_MAX_SNAPSHOT_BYTES } from "~/syntax-game/validation";
 import { assertSyntaxTimestamp } from "~/syntax-game/scoring";
 
 function freeze<T>(value: T): T {
@@ -42,6 +42,7 @@ export function prepareSyntaxSession(
 export function joinSyntaxSession(session: SyntaxSession, player: SyntaxPlayer): SyntaxSession {
   parseSyntaxId(player.id, "Player");
   if (session.players.some((existing) => existing.id === player.id)) return session;
+  if (session.players.length >= SYNTAX_MAX_PLAYERS) throw new Error(`Game capacity is ${SYNTAX_MAX_PLAYERS} players.`);
   if (typeof player.name !== "string" || !player.name.trim() || player.name.length > SYNTAX_MAX_PLAYER_NAME_LENGTH) {
     throw new Error(`Player name must be 1 to ${SYNTAX_MAX_PLAYER_NAME_LENGTH} characters.`);
   }
@@ -49,6 +50,13 @@ export function joinSyntaxSession(session: SyntaxSession, player: SyntaxPlayer):
   return freeze({ ...session, players: [...session.players, {
     id: player.id, name: player.name, playMode: session.snapshot.askPlayMode ? player.playMode : null,
   }] });
+}
+
+/** Leave ample headroom below the platform's 2 MB SQL value/row limit. */
+export function serializeSyntaxSnapshot(snapshot: SyntaxSessionSnapshot): string {
+  const body = JSON.stringify(snapshot);
+  if (new TextEncoder().encode(body).byteLength > SYNTAX_MAX_SNAPSHOT_BYTES) throw new Error("Game snapshot is too large. Use fewer rounds or shorter text.");
+  return body;
 }
 
 export function startSyntaxRound(session: SyntaxSession, now: number): SyntaxSession {

@@ -74,6 +74,11 @@ image revisions and session snapshots are retained, including after library edit
 - Each browser identity gets one accepted answer per round. Reconnects restore
   its receipt; an identical retry is safe. Display names are not unique identities.
   Browser IDs are not authentication or protection against deliberate impersonation.
+- Games admit at most 1,000 players, including disconnected identities, and
+  immutable launch snapshots are limited to 1 MiB. At capacity, existing players
+  can reconnect and keep answering; additional identities must wait for a new game.
+  Players and answers are stored in separate rows so long games cannot overflow
+  a single Durable Object SQL value. Existing local history remains readable.
 - Late joiners can answer the current round while time remains; prior rounds
   score zero. The room's in-person/online setting is captured at game launch.
 - Equal scores share competition ranks. Fastest-correct round results use server
