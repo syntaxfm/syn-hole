@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
-import NumberFlow from "@number-flow/react";
+import { FlowNumber as NumberFlow, type FlowNumberProps } from "~/components/flow-number";
 import usePartySocket from "partysocket/react";
 import {
   CheckCircle2,
@@ -1760,7 +1760,7 @@ function NumberWinnerResult(props: { winner: NumberWinner }) {
 
 function FlowNumber(props: {
   value: number;
-  format?: Intl.NumberFormatOptions;
+  format?: FlowNumberProps["format"];
   trend?: number;
   className?: string;
 }) {

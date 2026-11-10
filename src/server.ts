@@ -4,6 +4,9 @@ import { STARTER_QUESTIONS } from "./poll-room";
 import { copyRoomImages, deletePollImage, servePollImage, uploadPollImage } from "./poll-images";
 import type { PollQuestion, ReplaceQuestionsSource, RoomQuestionsResponse } from "./types";
 import { isSafeKeySegment } from "./utils/poll-images";
+import { routeSyntaxLibraryHttp } from "./syntax-game/library-http";
+import { routeSyntaxImagesHttp } from "./syntax-images";
+import { routeSyntaxHistoryHttp } from "./syntax-game/history-http";
 
 export { PollRoom } from "./poll-room";
 export { AdminRegistry } from "./admin-registry";
@@ -65,8 +68,29 @@ async function lookupRoomStartAt(env: Env, roomName: string): Promise<string | n
 }
 
 export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+  async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    const historyResponse = await routeSyntaxHistoryHttp(request, {
+      checkAdminAuth: (req) => checkAdminAuth(req, env),
+      roomFetch: (room, path) => fetchRoom(env, room, path),
+    });
+    if (historyResponse) return historyResponse;
+
+    const syntaxImageResponse = await routeSyntaxImagesHttp(request, {
+      bucket: env.POLL_IMAGES,
+      checkAdminAuth: (req) => checkAdminAuth(req, env),
+      registryFetch: (req) => getRegistryStub(env).fetch(req),
+    });
+    if (syntaxImageResponse) return syntaxImageResponse;
+
+    const libraryResponse = await routeSyntaxLibraryHttp(request, {
+      checkAdminAuth: (req) => checkAdminAuth(req, env),
+      lookupHostKey: (room) => lookupRoomHostKey(env, room),
+      defaultHostKey: "HOST_KEY" in env ? (env as { HOST_KEY?: string }).HOST_KEY : undefined,
+      registryFetch: (req) => getRegistryStub(env).fetch(req),
+    });
+    if (libraryResponse) return libraryResponse;
 
     if (url.pathname === "/api/bootstrap") {
       if (request.method === "HEAD") {
@@ -158,7 +182,9 @@ export default {
 
     if (partyResponse) return partyResponse;
 
-    return handler.fetch(request, env, ctx);
+    // TanStack accepts RequestOptions, not Worker env/ExecutionContext. All
+    // binding-dependent API/PartyServer work is handled above this app fallback.
+    return handler.fetch(request);
   },
 } satisfies ExportedHandler<Env>;
 
