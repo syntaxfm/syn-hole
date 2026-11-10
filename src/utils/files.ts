@@ -16,10 +16,15 @@ export function uploadWithProgress(options: {
   body: Blob;
   headers: Record<string, string>;
   onProgress: (percent: number) => void;
+  signal?: AbortSignal;
 }): Promise<UploadResult> {
   const { method, url, body, headers, onProgress } = options;
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
+    if (options.signal?.aborted) { reject(new Error("Upload was cancelled.")); return; }
+    const abort = () => request.abort();
+    options.signal?.addEventListener("abort", abort, { once: true });
+    request.addEventListener("loadend", () => options.signal?.removeEventListener("abort", abort));
     request.open(method, url);
     for (const [name, value] of Object.entries(headers)) {
       request.setRequestHeader(name, value);

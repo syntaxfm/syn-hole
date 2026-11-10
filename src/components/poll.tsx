@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
-import NumberFlow from "@number-flow/react";
+import { FlowNumber as NumberFlow, type FlowNumberProps } from "~/components/flow-number";
 import usePartySocket from "partysocket/react";
 import {
   CheckCircle2,
@@ -38,6 +38,9 @@ import {
 } from "~/utils/play-mode";
 import { isImageQuestion, isLandscapeImageSet } from "~/utils/poll-images";
 import { getOptionName } from "~/utils/questions";
+import { SyntaxHost } from "~/components/syntax-host";
+import { SyntaxPlayer } from "~/components/syntax-player";
+import type { SyntaxCommand, SyntaxOutgoingMessage, SyntaxStateMessage } from "~/syntax-game/protocol";
 
 type ViewMode = "audience" | "host" | "projector";
 
@@ -68,26 +71,31 @@ export function PollPage(props: { view: ViewMode; room?: string }) {
         : "audience";
 
   const [showDebug, setShowDebug] = useState(false);
+  const [mounted, setMounted] = useState(false);
   useEffect(() => {
+    setMounted(true);
     const params = new URLSearchParams(window.location.search);
     setShowDebug(params.get("debug") === "1");
   }, []);
 
-  const [hostKey, setHostKey] = useState(() => {
-    if (typeof window === "undefined") return "";
-    const params = new URLSearchParams(window.location.search);
-    const urlHostKey = params.get("hostKey") ?? params.get("key");
-    if (urlHostKey) {
-      saveHostKey(urlHostKey);
-      return urlHostKey;
-    }
-    return readHostKey();
-  });
+  // Browser credentials/identity are loaded after hydration, not during render.
+  const [hostKey, setHostKey] = useState("");
   const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([]);
   const [numberGuessInput, setNumberGuessInput] = useState("");
   const [numberGuessError, setNumberGuessError] = useState<string | null>(null);
   const [status, setStatus] = useState("connecting");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [syntaxState, setSyntaxState] = useState<SyntaxStateMessage | null>(null);
+  const [lastSyntaxMessage, setLastSyntaxMessage] = useState<SyntaxOutgoingMessage | null>(null);
+  const [syntaxError, setSyntaxError] = useState<string | null>(null);
+  const [hostPanel, setHostPanel] = useState<"poll" | "syntax">("poll");
+  const syntaxActive = syntaxState?.mode === "syntax";
+  const showSyntaxHost = view === "host" && (syntaxActive || hostPanel === "syntax");
+  const previousSyntaxMode = useRef(syntaxState?.mode);
+  useEffect(() => {
+    if (previousSyntaxMode.current === "syntax" && syntaxState?.mode === "poll") setHostPanel("poll");
+    previousSyntaxMode.current = syntaxState?.mode;
+  }, [syntaxState?.mode]);
   const [stateMessage, setStateMessage] = useState<
     Extract<OutgoingMessage, { type: "state" }> | null
   >(null);
@@ -98,16 +106,21 @@ export function PollPage(props: { view: ViewMode; room?: string }) {
     () => (role === "audience" ? getOrCreateVoterId() : ""),
     [role]
   );
-  const [audienceName, setAudienceName] = useState(() =>
-    role === "audience" ? readAudienceName() : ""
-  );
+  const [audienceName, setAudienceName] = useState("");
   const [pendingAudienceName, setPendingAudienceName] = useState(audienceName);
   const [askPlayModeBeforeJoin, setAskPlayModeBeforeJoin] = useState(false);
   const askPlayMode = role === "audience" && (stateMessage?.askPlayMode ?? askPlayModeBeforeJoin);
-  const [playMode, setPlayMode] = useState<PlayMode | null>(() =>
-    role === "audience" ? readPlayMode(room) : null
-  );
+  const [playMode, setPlayMode] = useState<PlayMode | null>(null);
   const [pendingPlayMode, setPendingPlayMode] = useState<PlayMode>(playMode ?? DEFAULT_PLAY_MODE);
+  useEffect(() => {
+    if (role !== "audience") return;
+    const name = readAudienceName();
+    const mode = readPlayMode(room);
+    setAudienceName(name);
+    setPendingAudienceName(name);
+    setPlayMode(mode);
+    setPendingPlayMode(mode ?? DEFAULT_PLAY_MODE);
+  }, [role, room]);
   const [isEditingIdentity, setIsEditingIdentity] = useState(false);
   const needsAudienceName = role === "audience" && audienceName.trim().length === 0;
   const showIdentityCheck =
@@ -127,6 +140,7 @@ export function PollPage(props: { view: ViewMode; room?: string }) {
     name: role === "audience" ? audienceName : undefined,
     playMode: askPlayMode && playMode ? playMode : undefined,
     hostKey: role === "host" ? hostKey.trim() : undefined,
+    syntaxProtocol: "1",
   };
 
   const socket = usePartySocket({
@@ -146,18 +160,31 @@ export function PollPage(props: { view: ViewMode; room?: string }) {
     },
     onMessage(event) {
       try {
-        const message = JSON.parse(event.data as string) as OutgoingMessage;
+        const message = JSON.parse(event.data as string) as OutgoingMessage | SyntaxOutgoingMessage;
+        if (message.type.startsWith("syntax:")) {
+          const syntaxMessage = message as SyntaxOutgoingMessage;
+          setLastSyntaxMessage(syntaxMessage);
+          if (syntaxMessage.type === "syntax:state") setSyntaxState(syntaxMessage);
+          if (syntaxMessage.type === "syntax:error") setSyntaxError(syntaxMessage.message);
+          return;
+        }
         if (message.type === "error") {
           setErrorMessage(message.message);
           return;
         }
         setErrorMessage(null);
-        setStateMessage(message);
+        if (message.type === "state") setStateMessage(message);
       } catch {
         setErrorMessage("Received malformed payload from server.");
       }
     },
   });
+
+  const sendSyntaxCommand = useCallback((command: SyntaxCommand) => {
+    if (socket.readyState !== WebSocket.OPEN) throw new Error("Socket is not connected. Reconnect before retrying.");
+    setSyntaxError(null);
+    socket.send(JSON.stringify(command));
+  }, [socket]);
 
   useEffect(() => {
     if (role !== "audience" || !stateMessage) {
@@ -177,9 +204,8 @@ export function PollPage(props: { view: ViewMode; room?: string }) {
     if (typeof window === "undefined") return;
     const params = new URLSearchParams(window.location.search);
     const urlHostKey = params.get("hostKey") ?? params.get("key");
-    if (!urlHostKey) return;
-    setHostKey(urlHostKey);
-    saveHostKey(urlHostKey);
+    setHostKey(urlHostKey ?? readHostKey());
+    if (urlHostKey) saveHostKey(urlHostKey);
   }, []);
 
   useEffect(() => {
@@ -203,7 +229,7 @@ export function PollPage(props: { view: ViewMode; room?: string }) {
   }, [role, room]);
 
   // A changed name or play mode only reaches the room on a fresh connection.
-  const identityKey = `${audienceName}|${playMode ?? ""}`;
+  const identityKey = `${audienceName}|${playMode ?? ""}|${role === "host" ? hostKey : ""}`;
   const connectedIdentityKey = useRef(identityKey);
   useEffect(() => {
     if (connectedIdentityKey.current === identityKey) return;
@@ -242,10 +268,10 @@ export function PollPage(props: { view: ViewMode; room?: string }) {
   }, [role, needsAudienceName]);
 
   const question = stateMessage?.question ?? null;
-  const roomLinks = useMemo(() => getRoomLinks(room, hostKey.trim()), [room, hostKey]);
+  const roomLinks = useMemo(() => getRoomLinks(room, hostKey.trim(), mounted), [room, hostKey, mounted]);
   const projectorFooterUrl = useMemo(
-    () => (view === "projector" ? getAudienceQrDetails(roomLinks.audience).shortLink : ""),
-    [roomLinks.audience, view]
+    () => (mounted && view === "projector" ? getAudienceQrDetails(roomLinks.audience).shortLink : ""),
+    [roomLinks.audience, view, mounted]
   );
   const showStartingSoon =
     stateMessage !== null &&
@@ -294,6 +320,7 @@ export function PollPage(props: { view: ViewMode; room?: string }) {
   }, [showStartingSoon, roomStartAtMs]);
 
   function sendMessage(message: IncomingMessage) {
+    if (syntaxActive) return;
     if (socket.readyState !== WebSocket.OPEN) {
       setErrorMessage("Socket is not connected yet.");
       return;
@@ -405,7 +432,7 @@ export function PollPage(props: { view: ViewMode; room?: string }) {
         </div>
       ) : null}
 
-      {stateMessage || errorMessage ? (
+      {(stateMessage || errorMessage) && (!syntaxActive || errorMessage) ? (
         <header className={`header-panel header-panel-compact ${view === "projector" ? "header-panel-projector" : ""}`}>
           <div className="header-top header-top-compact">
             {stateMessage ? (
@@ -413,7 +440,7 @@ export function PollPage(props: { view: ViewMode; room?: string }) {
                 <span className="live-chip live-chip-connected live-chip-compact" title="Participants">
                   <Users size={13} strokeWidth={2} aria-hidden />
                   <strong>
-                    <FlowInteger value={stateMessage.participants} />
+                    <FlowInteger value={syntaxActive ? syntaxState.session?.participants ?? 0 : stateMessage.participants} />
                   </strong>
                 </span>
                 {askPlayMode && playMode ? (
@@ -432,13 +459,19 @@ export function PollPage(props: { view: ViewMode; room?: string }) {
         </header>
       ) : null}
 
-      {!stateMessage ? (
+      {!stateMessage && !syntaxState ? (
         <section className="panel">
-          <p className="muted">Waiting for poll state...</p>
+          <p className="muted">Connecting…</p>
         </section>
       ) : null}
 
-      {stateMessage && view === "audience" ? (
+      {syntaxActive && syntaxState && (view === "audience" || view === "projector") ? (
+        <div className={view === "projector" ? "projector-shell" : undefined}>
+          <SyntaxPlayer state={syntaxState} lastMessage={lastSyntaxMessage} connected={status === "connected"} view={view} send={sendSyntaxCommand} />
+        </div>
+      ) : null}
+
+      {stateMessage && !syntaxActive && view === "audience" ? (
         showStartingSoon ? (
           <StartingSoonView
             stateMessage={stateMessage}
@@ -461,7 +494,26 @@ export function PollPage(props: { view: ViewMode; room?: string }) {
         )
       ) : null}
 
-      {stateMessage && view === "host" ? (
+      {view === "host" ? <nav className="syntax-tool-group syntax-mode-switch" aria-label="Room mode">
+        <button type="button" className="admin-action-btn" aria-pressed={!syntaxActive && hostPanel === "poll"} disabled={syntaxActive} onClick={() => setHostPanel("poll")}>Polls</button>
+        <button type="button" className="admin-action-btn" aria-pressed={showSyntaxHost} onClick={() => setHostPanel("syntax")}>Spot the Syntax Error</button>
+      </nav> : null}
+
+      {view === "host" && (showSyntaxHost || !stateMessage) ? (
+        <details className="syntax-details syntax-access" open={status !== "connected"}>
+          <summary>Room access</summary>
+          <label className="host-input-label">Host Access Key
+            <input className="text-input" type="password" value={hostKey} onChange={(event) => setHostKey(event.currentTarget.value)} />
+          </label>
+          <p className="muted"><a href={roomLinks.audience}>Audience</a> · <a href={roomLinks.projector}>Projector</a> · <a href="/admin/syntax/">Screenshot library</a></p>
+        </details>
+      ) : null}
+
+      {showSyntaxHost ? (
+        <SyntaxHost room={room} hostKey={hostKey.trim()} state={syntaxState} connected={status === "connected"} send={sendSyntaxCommand} error={syntaxError} />
+      ) : null}
+
+      {stateMessage && !syntaxActive && view === "host" && hostPanel === "poll" ? (
         <HostView
           stateMessage={stateMessage}
           sendMessage={sendMessage}
@@ -472,7 +524,7 @@ export function PollPage(props: { view: ViewMode; room?: string }) {
         />
       ) : null}
 
-      {stateMessage && view === "projector" ? (
+      {stateMessage && !syntaxActive && view === "projector" ? (
         showStartingSoon ? (
           <StartingSoonView
             stateMessage={stateMessage}
@@ -491,10 +543,10 @@ export function PollPage(props: { view: ViewMode; room?: string }) {
         <span className="app-bottom-left">SynHole</span>
         <div className="app-bottom-right">
           <span>Room: {room}</span>
-          <span>Role: {view}</span>
+          {!syntaxActive && <span>Role: {view}</span>}
           <span className="app-bottom-status">Status: {status}</span>
           {showDebug ? <span>debug</span> : null}
-          <span>Phase: {phaseLabel[stateMessage?.phase ?? "idle"] ?? "unknown"}</span>
+          {!syntaxActive && <span>Phase: {phaseLabel[stateMessage?.phase ?? "idle"] ?? "unknown"}</span>}
           {view === "projector" ? (
             <span className="projector-footer-url">{projectorFooterUrl}</span>
           ) : null}
@@ -1760,7 +1812,7 @@ function NumberWinnerResult(props: { winner: NumberWinner }) {
 
 function FlowNumber(props: {
   value: number;
-  format?: Intl.NumberFormatOptions;
+  format?: FlowNumberProps["format"];
   trend?: number;
   className?: string;
 }) {
@@ -1828,10 +1880,10 @@ function getAudienceOptionFeedback(
   return null;
 }
 
-function getRoomLinks(room: string, hostKey: string) {
+function getRoomLinks(room: string, hostKey: string, mounted: boolean) {
   const roomPath = `/r/${encodeURIComponent(room)}`;
   const hostPath = `${roomPath}/host`;
-  if (typeof window === "undefined") {
+  if (!mounted || typeof window === "undefined") {
     const host = hostKey
       ? `${hostPath}?hostKey=${encodeURIComponent(hostKey)}`
       : hostPath;

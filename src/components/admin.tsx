@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import type { FormEvent } from "react";
-import NumberFlow from "@number-flow/react";
+import { FlowNumber as NumberFlow } from "~/components/flow-number";
 import {
   Copy,
   CheckCheck,
@@ -327,7 +327,7 @@ export function AdminPage() {
       <header className="admin-header">
         <div>
           <h1>Room Admin</h1>
-          <p className="muted">Create and manage poll rooms</p>
+          <p className="muted">Create and manage poll rooms · <a href="/admin/syntax/">Spot the Syntax Error</a> · <a href="/admin/syntax/sets/">Game sets</a></p>
         </div>
         <button
           type="button"
@@ -489,6 +489,7 @@ export function AdminPage() {
                     </div>
 
                     <div className="admin-room-actions">
+                      <a className="admin-action-btn" href={`/admin/history/${encodeURIComponent(room.name)}`}>Game history</a>
                       <a className="admin-action-btn" href={`/admin/${encodeURIComponent(room.name)}`}>
                         <ListChecks size={13} strokeWidth={2} />
                         Questions

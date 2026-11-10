@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { ensureSyntaxLibrarySchema, SyntaxLibraryStore } from "./syntax-game/library";
 
 function normalizeStartAt(value: string): string | null {
   const trimmed = value.trim();
@@ -28,6 +29,7 @@ export class AdminRegistry extends DurableObject<Env> {
       this.ctx.storage.sql.exec("ALTER TABLE rooms ADD COLUMN start_at TEXT");
     }
     this.ctx.storage.sql.exec("UPDATE rooms SET start_at = created_at WHERE start_at IS NULL");
+    ensureSyntaxLibrarySchema(this.ctx.storage.sql);
     this.schemaInitialized = true;
   }
 
@@ -35,6 +37,13 @@ export class AdminRegistry extends DurableObject<Env> {
     this.ensureSchema();
     const url = new URL(request.url);
     const path = url.pathname;
+
+    if (path.startsWith("/syntax/")) {
+      // Includes trusted PUT/DELETE /syntax/entries/:id/image. Only the upload
+      // service calls PUT, after R2 storage; the public library router cannot
+      // forward client JSON into revision registration.
+      return new SyntaxLibraryStore(this.ctx.storage).fetch(request);
+    }
 
     if (path === "/rooms" && request.method === "GET") {
       const rows = this.ctx.storage.sql

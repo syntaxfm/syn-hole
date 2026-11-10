@@ -15,8 +15,15 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as AdminIndexRouteImport } from './routes/admin/index'
 import { Route as AdminRoomRouteImport } from './routes/admin/$room'
 import { Route as RRoomIndexRouteImport } from './routes/r/$room/index'
+import { Route as AdminSyntaxIndexRouteImport } from './routes/admin/syntax/index'
 import { Route as RRoomScreenRouteImport } from './routes/r/$room/screen'
 import { Route as RRoomHostRouteImport } from './routes/r/$room/host'
+import { Route as AdminSyntaxEntryIdRouteImport } from './routes/admin/syntax/$entryId'
+import { Route as AdminSyntaxSetsIndexRouteImport } from './routes/admin/syntax/sets/index'
+import { Route as AdminHistoryRoomIndexRouteImport } from './routes/admin/history/$room/index'
+import { Route as AdminSyntaxSetsNewRouteImport } from './routes/admin/syntax/sets/new'
+import { Route as AdminSyntaxSetsSetIdRouteImport } from './routes/admin/syntax/sets/$setId'
+import { Route as AdminHistoryRoomGameIdRouteImport } from './routes/admin/history/$room/$gameId'
 
 const ScreenRoute = ScreenRouteImport.update({
   id: '/screen',
@@ -48,6 +55,11 @@ const RRoomIndexRoute = RRoomIndexRouteImport.update({
   path: '/r/$room/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AdminSyntaxIndexRoute = AdminSyntaxIndexRouteImport.update({
+  id: '/admin/syntax/',
+  path: '/admin/syntax/',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const RRoomScreenRoute = RRoomScreenRouteImport.update({
   id: '/r/$room/screen',
   path: '/r/$room/screen',
@@ -58,6 +70,36 @@ const RRoomHostRoute = RRoomHostRouteImport.update({
   path: '/r/$room/host',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AdminSyntaxEntryIdRoute = AdminSyntaxEntryIdRouteImport.update({
+  id: '/admin/syntax/$entryId',
+  path: '/admin/syntax/$entryId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AdminSyntaxSetsIndexRoute = AdminSyntaxSetsIndexRouteImport.update({
+  id: '/admin/syntax/sets/',
+  path: '/admin/syntax/sets/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AdminHistoryRoomIndexRoute = AdminHistoryRoomIndexRouteImport.update({
+  id: '/admin/history/$room/',
+  path: '/admin/history/$room/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AdminSyntaxSetsNewRoute = AdminSyntaxSetsNewRouteImport.update({
+  id: '/admin/syntax/sets/new',
+  path: '/admin/syntax/sets/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AdminSyntaxSetsSetIdRoute = AdminSyntaxSetsSetIdRouteImport.update({
+  id: '/admin/syntax/sets/$setId',
+  path: '/admin/syntax/sets/$setId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AdminHistoryRoomGameIdRoute = AdminHistoryRoomGameIdRouteImport.update({
+  id: '/admin/history/$room/$gameId',
+  path: '/admin/history/$room/$gameId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -65,9 +107,16 @@ export interface FileRoutesByFullPath {
   '/screen': typeof ScreenRoute
   '/admin/$room': typeof AdminRoomRoute
   '/admin/': typeof AdminIndexRoute
+  '/admin/syntax/$entryId': typeof AdminSyntaxEntryIdRoute
   '/r/$room/host': typeof RRoomHostRoute
   '/r/$room/screen': typeof RRoomScreenRoute
+  '/admin/syntax/': typeof AdminSyntaxIndexRoute
   '/r/$room/': typeof RRoomIndexRoute
+  '/admin/history/$room/$gameId': typeof AdminHistoryRoomGameIdRoute
+  '/admin/syntax/sets/$setId': typeof AdminSyntaxSetsSetIdRoute
+  '/admin/syntax/sets/new': typeof AdminSyntaxSetsNewRoute
+  '/admin/history/$room/': typeof AdminHistoryRoomIndexRoute
+  '/admin/syntax/sets/': typeof AdminSyntaxSetsIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -75,9 +124,16 @@ export interface FileRoutesByTo {
   '/screen': typeof ScreenRoute
   '/admin/$room': typeof AdminRoomRoute
   '/admin': typeof AdminIndexRoute
+  '/admin/syntax/$entryId': typeof AdminSyntaxEntryIdRoute
   '/r/$room/host': typeof RRoomHostRoute
   '/r/$room/screen': typeof RRoomScreenRoute
+  '/admin/syntax': typeof AdminSyntaxIndexRoute
   '/r/$room': typeof RRoomIndexRoute
+  '/admin/history/$room/$gameId': typeof AdminHistoryRoomGameIdRoute
+  '/admin/syntax/sets/$setId': typeof AdminSyntaxSetsSetIdRoute
+  '/admin/syntax/sets/new': typeof AdminSyntaxSetsNewRoute
+  '/admin/history/$room': typeof AdminHistoryRoomIndexRoute
+  '/admin/syntax/sets': typeof AdminSyntaxSetsIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -86,9 +142,16 @@ export interface FileRoutesById {
   '/screen': typeof ScreenRoute
   '/admin/$room': typeof AdminRoomRoute
   '/admin/': typeof AdminIndexRoute
+  '/admin/syntax/$entryId': typeof AdminSyntaxEntryIdRoute
   '/r/$room/host': typeof RRoomHostRoute
   '/r/$room/screen': typeof RRoomScreenRoute
+  '/admin/syntax/': typeof AdminSyntaxIndexRoute
   '/r/$room/': typeof RRoomIndexRoute
+  '/admin/history/$room/$gameId': typeof AdminHistoryRoomGameIdRoute
+  '/admin/syntax/sets/$setId': typeof AdminSyntaxSetsSetIdRoute
+  '/admin/syntax/sets/new': typeof AdminSyntaxSetsNewRoute
+  '/admin/history/$room/': typeof AdminHistoryRoomIndexRoute
+  '/admin/syntax/sets/': typeof AdminSyntaxSetsIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -98,9 +161,16 @@ export interface FileRouteTypes {
     | '/screen'
     | '/admin/$room'
     | '/admin/'
+    | '/admin/syntax/$entryId'
     | '/r/$room/host'
     | '/r/$room/screen'
+    | '/admin/syntax/'
     | '/r/$room/'
+    | '/admin/history/$room/$gameId'
+    | '/admin/syntax/sets/$setId'
+    | '/admin/syntax/sets/new'
+    | '/admin/history/$room/'
+    | '/admin/syntax/sets/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -108,9 +178,16 @@ export interface FileRouteTypes {
     | '/screen'
     | '/admin/$room'
     | '/admin'
+    | '/admin/syntax/$entryId'
     | '/r/$room/host'
     | '/r/$room/screen'
+    | '/admin/syntax'
     | '/r/$room'
+    | '/admin/history/$room/$gameId'
+    | '/admin/syntax/sets/$setId'
+    | '/admin/syntax/sets/new'
+    | '/admin/history/$room'
+    | '/admin/syntax/sets'
   id:
     | '__root__'
     | '/'
@@ -118,9 +195,16 @@ export interface FileRouteTypes {
     | '/screen'
     | '/admin/$room'
     | '/admin/'
+    | '/admin/syntax/$entryId'
     | '/r/$room/host'
     | '/r/$room/screen'
+    | '/admin/syntax/'
     | '/r/$room/'
+    | '/admin/history/$room/$gameId'
+    | '/admin/syntax/sets/$setId'
+    | '/admin/syntax/sets/new'
+    | '/admin/history/$room/'
+    | '/admin/syntax/sets/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -129,9 +213,16 @@ export interface RootRouteChildren {
   ScreenRoute: typeof ScreenRoute
   AdminRoomRoute: typeof AdminRoomRoute
   AdminIndexRoute: typeof AdminIndexRoute
+  AdminSyntaxEntryIdRoute: typeof AdminSyntaxEntryIdRoute
   RRoomHostRoute: typeof RRoomHostRoute
   RRoomScreenRoute: typeof RRoomScreenRoute
+  AdminSyntaxIndexRoute: typeof AdminSyntaxIndexRoute
   RRoomIndexRoute: typeof RRoomIndexRoute
+  AdminHistoryRoomGameIdRoute: typeof AdminHistoryRoomGameIdRoute
+  AdminSyntaxSetsSetIdRoute: typeof AdminSyntaxSetsSetIdRoute
+  AdminSyntaxSetsNewRoute: typeof AdminSyntaxSetsNewRoute
+  AdminHistoryRoomIndexRoute: typeof AdminHistoryRoomIndexRoute
+  AdminSyntaxSetsIndexRoute: typeof AdminSyntaxSetsIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -178,6 +269,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RRoomIndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/admin/syntax/': {
+      id: '/admin/syntax/'
+      path: '/admin/syntax'
+      fullPath: '/admin/syntax/'
+      preLoaderRoute: typeof AdminSyntaxIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/r/$room/screen': {
       id: '/r/$room/screen'
       path: '/r/$room/screen'
@@ -192,6 +290,48 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RRoomHostRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/admin/syntax/$entryId': {
+      id: '/admin/syntax/$entryId'
+      path: '/admin/syntax/$entryId'
+      fullPath: '/admin/syntax/$entryId'
+      preLoaderRoute: typeof AdminSyntaxEntryIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/admin/syntax/sets/': {
+      id: '/admin/syntax/sets/'
+      path: '/admin/syntax/sets'
+      fullPath: '/admin/syntax/sets/'
+      preLoaderRoute: typeof AdminSyntaxSetsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/admin/history/$room/': {
+      id: '/admin/history/$room/'
+      path: '/admin/history/$room'
+      fullPath: '/admin/history/$room/'
+      preLoaderRoute: typeof AdminHistoryRoomIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/admin/syntax/sets/new': {
+      id: '/admin/syntax/sets/new'
+      path: '/admin/syntax/sets/new'
+      fullPath: '/admin/syntax/sets/new'
+      preLoaderRoute: typeof AdminSyntaxSetsNewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/admin/syntax/sets/$setId': {
+      id: '/admin/syntax/sets/$setId'
+      path: '/admin/syntax/sets/$setId'
+      fullPath: '/admin/syntax/sets/$setId'
+      preLoaderRoute: typeof AdminSyntaxSetsSetIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/admin/history/$room/$gameId': {
+      id: '/admin/history/$room/$gameId'
+      path: '/admin/history/$room/$gameId'
+      fullPath: '/admin/history/$room/$gameId'
+      preLoaderRoute: typeof AdminHistoryRoomGameIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -201,9 +341,16 @@ const rootRouteChildren: RootRouteChildren = {
   ScreenRoute: ScreenRoute,
   AdminRoomRoute: AdminRoomRoute,
   AdminIndexRoute: AdminIndexRoute,
+  AdminSyntaxEntryIdRoute: AdminSyntaxEntryIdRoute,
   RRoomHostRoute: RRoomHostRoute,
   RRoomScreenRoute: RRoomScreenRoute,
+  AdminSyntaxIndexRoute: AdminSyntaxIndexRoute,
   RRoomIndexRoute: RRoomIndexRoute,
+  AdminHistoryRoomGameIdRoute: AdminHistoryRoomGameIdRoute,
+  AdminSyntaxSetsSetIdRoute: AdminSyntaxSetsSetIdRoute,
+  AdminSyntaxSetsNewRoute: AdminSyntaxSetsNewRoute,
+  AdminHistoryRoomIndexRoute: AdminHistoryRoomIndexRoute,
+  AdminSyntaxSetsIndexRoute: AdminSyntaxSetsIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
